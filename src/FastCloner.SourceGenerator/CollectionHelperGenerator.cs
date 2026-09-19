@@ -424,7 +424,7 @@ internal static class CollectionHelperGenerator
         {
             string extensionClassName = MemberCloneGenerator.GetExtensionClassNameForType(member);
             string stateArg = parentNeedsState ? "state" : "null";
-            return $"{extensionClassName}.InternalFastDeepClone({itemVar}, {stateArg})!";
+            return MemberCloneGenerator.GetClonableCloneExpression(extensionClassName, itemVar, stateArg);
         }
 
         if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
@@ -668,7 +668,8 @@ internal static class CollectionHelperGenerator
         {
             if (member.KeyIsClonable)
             {
-                keyExpr = "kvp.Key?.FastDeepClone()!";
+                string actualStateVar = needsState ? "state" : "null";
+                keyExpr = MemberCloneGenerator.GetClonableCloneExpression(member.KeyClonableExtensionClass!, "kvp.Key", actualStateVar);
             }
             else if (context.TryGetMemberModel(member.KeyTypeName!, out MemberModel nestedKeyModel))
             {
@@ -703,7 +704,8 @@ internal static class CollectionHelperGenerator
         {
             if (member.ValueIsClonable)
             {
-                valExpr = "kvp.Value?.FastDeepClone()!";
+                string actualStateVar = needsState ? "state" : "null";
+                valExpr = MemberCloneGenerator.GetClonableCloneExpression(member.ValueClonableExtensionClass!, "kvp.Value", actualStateVar);
             }
             else if (context.TryGetMemberModel(member.ValueTypeName!, out MemberModel nestedValModel))
             {
@@ -788,7 +790,9 @@ internal static class CollectionHelperGenerator
             
             if (hasClonableAttr)
             {
-                itemExpr = "source[i]?.FastDeepClone()!";
+                string actualStateVar = needsState ? "state" : "null";
+                itemExpr = MemberCloneGenerator.GetClonableCloneExpression(
+                    MemberCloneGenerator.GetExtensionClassNameForType(member), "source[i]", actualStateVar);
             }
             else if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
             {
@@ -896,7 +900,9 @@ internal static class CollectionHelperGenerator
             string itemExpr;
             if (hasClonableAttr)
             {
-                itemExpr = $"source[{indexList}]?.FastDeepClone()!";
+                string actualStateVar = needsState ? "state" : "null";
+                itemExpr = MemberCloneGenerator.GetClonableCloneExpression(
+                    MemberCloneGenerator.GetExtensionClassNameForType(member), $"source[{indexList}]", actualStateVar);
             }
             else if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
             {
@@ -986,7 +992,7 @@ internal static class CollectionHelperGenerator
 
         if (needsState)
         {
-            sb.AppendLine($"        private {staticMod}{typeName}{typeSuffix} {methodName}{typeParams}({typeName}{typeSuffix} source, FcGeneratedCloneState? state){constraints}");
+            sb.AppendLine($"        private {staticMod}{typeName}{typeSuffix} {methodName}{typeParams}({typeName}{typeSuffix} source, {GeneratedTypeNames.CloneState}? state){constraints}");
         }
         else
         {

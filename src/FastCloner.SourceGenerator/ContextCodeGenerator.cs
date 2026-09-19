@@ -57,9 +57,6 @@ internal sealed class ContextCodeGenerator
         GenerateIsHandled();
         GenerateTryClone();
 
-        // Generate State class (shared)
-        GenerateStateClass();
-
         _sb.AppendLine("    }");
 
         if (!string.IsNullOrEmpty(_model.Namespace))
@@ -100,50 +97,47 @@ internal sealed class ContextCodeGenerator
              }
         }
 
-        // Determine if we really need state tracking for this type
-        bool needsState = _needsState.ContainsKey(model.FullyQualifiedName) && _needsState[model.FullyQualifiedName];
+        // Root allocation: cycles among registered types, or any graph that the type
+        // model already flagged for identity tracking (collections, shared refs, ...).
+        // The 2-arg overload is always emitted so collection helpers can pass state
+        // even when this type itself is not a cycle root.
+        bool allocateState = model.NeedsStateTracking
+            || (_needsState.ContainsKey(model.FullyQualifiedName) && _needsState[model.FullyQualifiedName]);
 
-        // Only generate NotNullIfNotNull attribute if it's available in the runtime (not from polyfill)
         string notNullAttr = CloneGeneratorContext.NotNullIfNotNullAttr(_model.CodeAnalysisAvailable);
         if (!string.IsNullOrEmpty(notNullAttr))
             _sb.AppendLine($"        {notNullAttr}");
         _sb.AppendLine($"        public {typeName}? Clone({typeName}? source)");
         _sb.AppendLine("        {");
-        
-        if (!needsState)
+        if (allocateState)
         {
-             _sb.AppendLine("            if (source == null) return null;");
-             GenerateCloneBody(ctx, typeName, false);
-             _sb.Append(ctx.Source.ToString());
-             ctx.Source.Clear();
+            _sb.AppendLine($"            return Clone(source, new {GeneratedTypeNames.CloneState}());");
         }
         else
         {
-             // Fix: if type needs state, the public method MUST initialize it
-             _sb.AppendLine($"            return Clone(source, new FcGeneratedCloneState());");
+            _sb.AppendLine("            return Clone(source, null);");
         }
         _sb.AppendLine("        }");
         _sb.AppendLine();
 
-        if (needsState)
-        {
-             _sb.AppendLine($"        private {typeName}? Clone({typeName}? source, FcGeneratedCloneState state)");
-             _sb.AppendLine("        {");
-             _sb.AppendLine("            if (source == null) return null;");
-             // Fix: Remove the state ?? new check - state is always passed and managed by caller
-             
-             if (!model.IsStruct)
-             {
-                 _sb.AppendLine("            var known = state.GetKnownRef(source);");
-                 _sb.AppendLine($"            if (known != null) return ({typeName})known;");
-             }
+        _sb.AppendLine($"        private {typeName}? Clone({typeName}? source, {GeneratedTypeNames.CloneState}? state)");
+        _sb.AppendLine("        {");
+        _sb.AppendLine("            if (source == null) return null;");
 
-             GenerateCloneBody(ctx, typeName, true, "state");
-             _sb.Append(ctx.Source.ToString());
-             ctx.Source.Clear();
-             _sb.AppendLine("        }");
-             _sb.AppendLine();
+        if (!model.IsStruct)
+        {
+            _sb.AppendLine("            if (state != null)");
+            _sb.AppendLine("            {");
+            _sb.AppendLine("                var known = state.GetKnownRef(source);");
+            _sb.AppendLine($"                if (known != null) return ({typeName})known;");
+            _sb.AppendLine("            }");
         }
+
+        GenerateCloneBody(ctx, typeName, true, "state");
+        _sb.Append(ctx.Source.ToString());
+        ctx.Source.Clear();
+        _sb.AppendLine("        }");
+        _sb.AppendLine();
         
         // Generate helpers that were triggered by this type
         CollectionHelperGenerator.GenerateHelpers(ctx);
@@ -180,7 +174,7 @@ internal sealed class ContextCodeGenerator
 
     private void WriteClassCloneBody(CloneGeneratorContext ctx, string typeName, bool useState, string? stateVarName)
     {
-        ClassCloneBodyGenerator.WriteClassCloneBody(ctx, typeName, useState, stateVarName, useNullConditional: false);
+        ClassCloneBodyGenerator.WriteClassCloneBody(ctx, typeName, useState, stateVarName, useNullConditional: true);
     }
 
     private void GenerateDispatcher()
@@ -250,41 +244,6 @@ internal sealed class ContextCodeGenerator
         _sb.AppendLine("            return false;");
         _sb.AppendLine("        }");
         _sb.AppendLine();
-    }
-
-    private void GenerateStateClass()
-    {
-        // Only generate state class if at least one type needs circular reference tracking
-        if (!_needsState.Any(kvp => kvp.Value))
-            return;
-
-        _sb.AppendLine("        /// <summary>");
-        _sb.AppendLine("        /// State for tracking circular references during cloning.");
-        _sb.AppendLine("        /// </summary>");
-        _sb.AppendLine("        private class FcGeneratedCloneState");
-        _sb.AppendLine("        {");
-        _sb.AppendLine("            private readonly Dictionary<object, object> _knownRefs = new Dictionary<object, object>(new ReferenceEqualityComparer());");
-        _sb.AppendLine();
-        _sb.AppendLine("            public void AddKnownRef(object original, object clone)");
-        _sb.AppendLine("            {");
-        _sb.AppendLine("                if (original != null)");
-        _sb.AppendLine("                {");
-        _sb.AppendLine("                    _knownRefs[original] = clone;");
-        _sb.AppendLine("                }");
-        _sb.AppendLine("            }");
-        _sb.AppendLine();
-        _sb.AppendLine("            public object? GetKnownRef(object original)");
-        _sb.AppendLine("            {");
-        _sb.AppendLine("                if (original == null) return null;");
-        _sb.AppendLine("                return _knownRefs.TryGetValue(original, out var clone) ? clone : null;");
-        _sb.AppendLine("            }");
-        _sb.AppendLine();
-        _sb.AppendLine("            private sealed class ReferenceEqualityComparer : IEqualityComparer<object>");
-        _sb.AppendLine("            {");
-        _sb.AppendLine("                bool IEqualityComparer<object>.Equals(object? x, object? y) => ReferenceEquals(x, y);");
-        _sb.AppendLine("                int IEqualityComparer<object>.GetHashCode(object obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);");
-        _sb.AppendLine("            }");
-        _sb.AppendLine("        }");
     }
 
     private void AnalyzeCircularDependencies()

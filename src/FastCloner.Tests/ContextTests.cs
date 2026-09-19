@@ -150,6 +150,109 @@ public class ContextTests
         await Assert.That(clone).IsNotSameReferenceAs(original);
         await Assert.That(clone.Self).IsSameReferenceAs(clone); // Circular reference should be preserved
     }
+
+    [Test]
+    public async Task Context_Should_Clone_Registered_Type_With_List_Member()
+    {
+        Issue56ListContext ctx = new Issue56ListContext();
+        Issue56Address berlin = new Issue56Address { City = "Berlin" };
+        Issue56Customer original = new Issue56Customer
+        {
+            Name = "Jane",
+            Address = berlin,
+            PreviousAddresses = [berlin, new Issue56Address { City = "Munich" }]
+        };
+
+        Issue56Customer clone = ctx.Clone(original)!;
+
+        await Assert.That(clone).IsNotSameReferenceAs(original);
+        await Assert.That(clone.Name).IsEqualTo("Jane");
+        await Assert.That(clone.Address).IsNotSameReferenceAs(original.Address);
+        await Assert.That(clone.Address!.City).IsEqualTo("Berlin");
+        await Assert.That(clone.PreviousAddresses).IsNotNull();
+        await Assert.That(clone.PreviousAddresses).IsNotSameReferenceAs(original.PreviousAddresses);
+        await Assert.That(clone.PreviousAddresses!.Count).IsEqualTo(2);
+        await Assert.That(clone.PreviousAddresses[0]).IsNotSameReferenceAs(original.PreviousAddresses![0]);
+        await Assert.That(clone.PreviousAddresses[0]!.City).IsEqualTo("Berlin");
+        await Assert.That(clone.PreviousAddresses[1]!.City).IsEqualTo("Munich");
+
+        clone.PreviousAddresses[0]!.City = "Hamburg";
+        await Assert.That(original.PreviousAddresses[0]!.City).IsEqualTo("Berlin");
+    }
+
+    [Test]
+    public async Task Context_Should_Clone_Registered_Type_With_Array_Member()
+    {
+        Issue56ArrayContext ctx = new Issue56ArrayContext();
+        Issue56ArrayHolder original = new Issue56ArrayHolder
+        {
+            Items = [new Issue56Address { City = "Prague" }, new Issue56Address { City = "Brno" }]
+        };
+
+        Issue56ArrayHolder clone = ctx.Clone(original)!;
+
+        await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+        await Assert.That(clone.Items![0]).IsNotSameReferenceAs(original.Items![0]);
+        await Assert.That(clone.Items[0]!.City).IsEqualTo("Prague");
+        await Assert.That(clone.Items[1]!.City).IsEqualTo("Brno");
+    }
+
+    [Test]
+    public async Task Context_Should_Clone_Registered_Type_With_Dictionary_Member()
+    {
+        Issue56DictionaryContext ctx = new Issue56DictionaryContext();
+        Issue56DictionaryHolder original = new Issue56DictionaryHolder
+        {
+            Map = new Dictionary<string, Issue56Address>
+            {
+                ["home"] = new Issue56Address { City = "Oslo" }
+            }
+        };
+
+        Issue56DictionaryHolder clone = ctx.Clone(original)!;
+
+        await Assert.That(clone.Map).IsNotSameReferenceAs(original.Map);
+        await Assert.That(clone.Map!["home"]).IsNotSameReferenceAs(original.Map!["home"]);
+        await Assert.That(clone.Map["home"].City).IsEqualTo("Oslo");
+    }
+
+    [Test]
+    public async Task Context_Should_Clone_Registered_Type_With_HashSet_Member()
+    {
+        Issue56HashSetContext ctx = new Issue56HashSetContext();
+        Issue56HashSetHolder original = new Issue56HashSetHolder
+        {
+            Items = [new Issue56Address { City = "Lisbon" }]
+        };
+
+        Issue56HashSetHolder clone = ctx.Clone(original)!;
+
+        await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+        await Assert.That(clone.Items!.Count).IsEqualTo(1);
+        await Assert.That(clone.Items.Any(a => a.City == "Lisbon")).IsTrue();
+        await Assert.That(clone.Items.Any(a => original.Items!.Contains(a))).IsFalse();
+    }
+
+    [Test]
+    public async Task Context_Should_Clone_Registered_Type_With_Nested_Dictionary_Of_List()
+    {
+        Issue56NestedContext ctx = new Issue56NestedContext();
+        Issue56NestedHolder original = new Issue56NestedHolder
+        {
+            Groups = new Dictionary<string, List<Issue56Address>>
+            {
+                ["eu"] = [new Issue56Address { City = "Paris" }, new Issue56Address { City = "Rome" }]
+            }
+        };
+
+        Issue56NestedHolder clone = ctx.Clone(original)!;
+
+        await Assert.That(clone.Groups).IsNotSameReferenceAs(original.Groups);
+        await Assert.That(clone.Groups!["eu"]).IsNotSameReferenceAs(original.Groups!["eu"]);
+        await Assert.That(clone.Groups["eu"][0]).IsNotSameReferenceAs(original.Groups["eu"][0]);
+        await Assert.That(clone.Groups["eu"][0].City).IsEqualTo("Paris");
+        await Assert.That(clone.Groups["eu"][1].City).IsEqualTo("Rome");
+    }
 }
 
 public class NodeA { public NodeB? B { get; set; } }
@@ -209,3 +312,52 @@ public class ClassWithCircularRef
 
 [FastClonerRegister(typeof(ClassWithCircularRef))]
 public partial class NoParameterlessCtorCircularContext : FastClonerContext {}
+
+// Issue #56: identity-tracking members (collections/arrays/dictionaries of non-safe
+// element types) must compile and produce an independent deep copy.
+public class Issue56Customer
+{
+    public string Name { get; set; } = string.Empty;
+    public Issue56Address? Address { get; set; }
+    public List<Issue56Address>? PreviousAddresses { get; set; }
+}
+
+public class Issue56Address
+{
+    public string City { get; set; } = string.Empty;
+}
+
+[FastClonerRegister(typeof(Issue56Customer), typeof(Issue56Address))]
+public partial class Issue56ListContext : FastClonerContext {}
+
+public class Issue56ArrayHolder
+{
+    public Issue56Address[]? Items { get; set; }
+}
+
+[FastClonerRegister(typeof(Issue56ArrayHolder), typeof(Issue56Address))]
+public partial class Issue56ArrayContext : FastClonerContext {}
+
+public class Issue56DictionaryHolder
+{
+    public Dictionary<string, Issue56Address>? Map { get; set; }
+}
+
+[FastClonerRegister(typeof(Issue56DictionaryHolder), typeof(Issue56Address))]
+public partial class Issue56DictionaryContext : FastClonerContext {}
+
+public class Issue56HashSetHolder
+{
+    public HashSet<Issue56Address>? Items { get; set; }
+}
+
+[FastClonerRegister(typeof(Issue56HashSetHolder), typeof(Issue56Address))]
+public partial class Issue56HashSetContext : FastClonerContext {}
+
+public class Issue56NestedHolder
+{
+    public Dictionary<string, List<Issue56Address>>? Groups { get; set; }
+}
+
+[FastClonerRegister(typeof(Issue56NestedHolder), typeof(Issue56Address))]
+public partial class Issue56NestedContext : FastClonerContext {}

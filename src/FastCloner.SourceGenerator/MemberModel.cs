@@ -117,7 +117,9 @@ internal readonly record struct MemberModel(
     // Never assumed from CollectionKind: Collection<T>, BindingList<T> etc. share the List kind but not List's API (issue #50).
     bool ConcreteIsList = false,          // Concrete type is exactly List<T>, so CollectionsMarshal is valid
     bool ConcreteHasCapacityCtor = false, // Concrete type has a public .ctor(int capacity)
-    bool ConcreteHasCopyCtor = false      // Concrete type has a ctor verified to COPY the source collection
+    bool ConcreteHasCopyCtor = false,     // Concrete type has a ctor verified to COPY the source collection
+    string? KeyClonableExtensionClass = null,   // Precomputed FQN of the extension class for the dictionary key type (when KeyIsClonable)
+    string? ValueClonableExtensionClass = null  // Precomputed FQN of the extension class for the dictionary value type (when ValueIsClonable)
 ) : IEquatable<MemberModel>
 {
     /// <summary>
@@ -212,7 +214,9 @@ internal readonly record struct MemberModel(
             hasBackingFieldStorage,
             ConcreteIsList: concreteIsList,
             ConcreteHasCapacityCtor: concreteHasCapacityCtor,
-            ConcreteHasCopyCtor: concreteHasCopyCtor);
+            ConcreteHasCopyCtor: concreteHasCopyCtor,
+            KeyClonableExtensionClass: GetDictionaryClonableExtensionClass(property.Type, keyClonable, isKey: true, compilation),
+            ValueClonableExtensionClass: GetDictionaryClonableExtensionClass(property.Type, valClonable, isKey: false, compilation));
     }
 
     public static MemberModel Create(IFieldSymbol field, bool nullabilityEnabled, Compilation compilation, MemberCloneBehavior memberBehavior = MemberCloneBehavior.Clone)
@@ -282,7 +286,22 @@ internal readonly record struct MemberModel(
             isWeaverState,
             ConcreteIsList: concreteIsList,
             ConcreteHasCapacityCtor: concreteHasCapacityCtor,
-            ConcreteHasCopyCtor: concreteHasCopyCtor);
+            ConcreteHasCopyCtor: concreteHasCopyCtor,
+            KeyClonableExtensionClass: GetDictionaryClonableExtensionClass(field.Type, keyClonable, isKey: true, compilation),
+            ValueClonableExtensionClass: GetDictionaryClonableExtensionClass(field.Type, valClonable, isKey: false, compilation));
+    }
+
+    private static string? GetDictionaryClonableExtensionClass(ITypeSymbol type, bool isClonable, bool isKey, Compilation compilation)
+    {
+        if (!isClonable)
+            return null;
+
+        (ITypeSymbol KeyType, ITypeSymbol ValueType)? dictTypes = TypeAnalyzer.GetDictionaryTypes(type, compilation);
+        if (!dictTypes.HasValue)
+            return null;
+
+        ITypeSymbol component = isKey ? dictTypes.Value.KeyType : dictTypes.Value.ValueType;
+        return TypeAnalyzer.ComputeExtensionClassFqn(component);
     }
     
     private static bool IsAccessibleFromExternalClass(Accessibility accessibility) =>

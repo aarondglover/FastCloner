@@ -90,8 +90,12 @@ internal static class ContextCollector
             }
         }
 
-        // Deduplicate
-        TypeModel[] uniqueTypes = registeredTypes.GroupBy(t => t.FullyQualifiedName).Select(g => g.First()).ToArray();
+        // Deduplicate. Stamp FastCloner availability onto each type so nested
+        // collection helpers can fall back to the runtime cloner when needed.
+        TypeModel[] uniqueTypes = registeredTypes
+            .GroupBy(t => t.FullyQualifiedName)
+            .Select(g => g.First())
+            .ToArray();
 
         // Check if FastCloner library is available (same check as TypeModelFactory)
         bool isFastClonerAvailable = compilation.GetTypeByMetadataName("FastCloner.FastCloner") != null;
@@ -104,6 +108,10 @@ internal static class ContextCollector
         {
             isFastClonerAvailable = false;
         }
+
+        uniqueTypes = uniqueTypes
+            .Select(t => t with { IsFastClonerAvailable = isFastClonerAvailable })
+            .ToArray();
 
         // Check if System.Diagnostics.CodeAnalysis attributes are available
         bool codeAnalysisAvailable = compilation.GetTypeByMetadataName("System.Diagnostics.CodeAnalysis.NotNullIfNotNullAttribute") != null;

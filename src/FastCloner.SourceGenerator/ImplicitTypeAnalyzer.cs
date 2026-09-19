@@ -74,6 +74,40 @@ internal static class ImplicitTypeAnalyzer
                 bool TryHandleComponent(ITypeSymbol componentType, out MemberModel? componentMember)
                 {
                     componentMember = null;
+
+                    // Nested collections/arrays/dictionaries are not implicit POCOs.
+                    // Walk through to the element/key/value types so Holder{ List<List<T>> }
+                    // and Holder{ Dictionary<string, List<T>> } still register.
+                    if (componentType is IArrayTypeSymbol arrayType)
+                    {
+                        return TryHandleComponent(arrayType.ElementType, out componentMember);
+                    }
+
+                    if (TypeAnalyzer.IsCollectionType(componentType))
+                    {
+                        ITypeSymbol? elemType = TypeAnalyzer.GetCollectionElementType(componentType, compilation);
+                        return elemType != null && TryHandleComponent(elemType, out componentMember);
+                    }
+
+                    if (TypeAnalyzer.IsDictionaryType(componentType))
+                    {
+                        (ITypeSymbol KeyType, ITypeSymbol ValueType)? dictTypes = TypeAnalyzer.GetDictionaryTypes(componentType, compilation);
+                        if (!dictTypes.HasValue)
+                            return false;
+
+                        MemberModel? keyMember = null;
+                        MemberModel? valMember = null;
+                        bool keyOk = TypeAnalyzer.IsSafeType(dictTypes.Value.KeyType, compilation)
+                            || TryHandleComponent(dictTypes.Value.KeyType, out keyMember);
+                        bool valOk = TypeAnalyzer.IsSafeType(dictTypes.Value.ValueType, compilation)
+                            || TryHandleComponent(dictTypes.Value.ValueType, out valMember);
+                        componentMember = valMember ?? keyMember;
+                        return keyOk && valOk;
+                    }
+
+                    if (TypeAnalyzer.IsSafeType(componentType, compilation) || TypeAnalyzer.HasClonableAttribute(componentType))
+                        return true;
+
                     if (TryAnalyze(componentType, compilation, nullabilityEnabled, targetFramework, externalIgnores, cache, processingStack, out TypeModel? compModel))
                     {
                         if (compModel != null) childRelatedTypes.Add(compModel);
@@ -196,7 +230,7 @@ internal static class ImplicitTypeAnalyzer
                 flags.HasClonableBaseClass,
                 canHaveCircularRefs,
                 canHaveCircularRefs,
-                false,
+                compilation.GetTypeByMetadataName("FastCloner.FastCloner") != null,
                 new EquatableArray<MemberModel>(finalImplicitMembers.ToArray()),
                 new EquatableArray<string>(TypeAnalyzer.GetTypeParameters(namedType).ToArray()),
                 new EquatableArray<string>(TypeAnalyzer.GetTypeConstraints(namedType).ToArray()),

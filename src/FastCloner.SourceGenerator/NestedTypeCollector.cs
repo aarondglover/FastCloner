@@ -69,6 +69,8 @@ internal static class NestedTypeCollector
                  string keyTypeName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.KeyType);
                  string valTypeName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.ValueType);
                  string concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collKind, $"{keyTypeName}, {valTypeName}");
+                 string? keyExtClass = keyClon ? TypeAnalyzer.ComputeExtensionClassFqn(dictTypes.Value.KeyType) : null;
+                 string? valExtClass = valClon ? TypeAnalyzer.ComputeExtensionClassFqn(dictTypes.Value.ValueType) : null;
 
                  MemberModel model = new MemberModel(
                     "NestedHelper", // Dummy name
@@ -94,7 +96,9 @@ internal static class NestedTypeCollector
                     MemberCloneBehavior.Clone,  // MemberBehavior - helper methods use default cloning
                     ConcreteIsList: caps.IsExactList,
                     ConcreteHasCapacityCtor: caps.HasCapacityCtor,
-                    ConcreteHasCopyCtor: caps.HasCopyCtor
+                    ConcreteHasCopyCtor: caps.HasCopyCtor,
+                    KeyClonableExtensionClass: keyExtClass,
+                    ValueClonableExtensionClass: valExtClass
                  );
                  
                  if (!nestedTypes.ContainsKey(model.TypeFullName))

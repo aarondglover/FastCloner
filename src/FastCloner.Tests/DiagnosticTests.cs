@@ -558,6 +558,92 @@ public sealed class Container
         await Assert.That(combined).Contains("Dictionary<string, global::TestNamespace.Payload?>");
     }
 
+    #region Issue 57 — cross-namespace clonable collection elements
+
+    private const string Issue57SharedTypes = """
+        using FastCloner.SourceGenerator.Shared;
+        using System.Collections.Generic;
+
+        namespace Repro.NamespaceA
+        {
+            [FastClonerClonable]
+            public sealed record Value
+            {
+                public string Text { get; init; } = string.Empty;
+            }
+        }
+        """;
+
+    [Test]
+    [Arguments("DictionaryValue", "public Dictionary<int, global::Repro.NamespaceA.Value?>? Items { get; set; }")]
+    [Arguments("DictionaryKey", "public Dictionary<global::Repro.NamespaceA.Value, int>? Items { get; set; }")]
+    [Arguments("List", "public List<global::Repro.NamespaceA.Value?>? Items { get; set; }")]
+    [Arguments("HashSet", "public HashSet<global::Repro.NamespaceA.Value?>? Items { get; set; }")]
+    [Arguments("Array", "public global::Repro.NamespaceA.Value?[]? Items { get; set; }")]
+    [Arguments("MultiDimArray", "public global::Repro.NamespaceA.Value?[,]? Items { get; set; }")]
+    [Arguments("NestedDictOfList", "public Dictionary<int, List<global::Repro.NamespaceA.Value?>>? Items { get; set; }")]
+    public async Task Issue57_CrossNamespaceClonableInCollection_ShouldCompile(string scenario, string members)
+    {
+        // https://github.com/lofcz/FastCloner/issues/57
+        // Generated helpers live in the containing type's namespace. Calling
+        // TValue.FastDeepClone() as an extension method is unresolvable unless that
+        // namespace imports TValue's namespace — so helpers must emit a fully-qualified
+        // static call to TValue's extension class instead.
+        string source =
+            "#nullable enable\n" +
+            Issue57SharedTypes +
+            "\nnamespace Repro.NamespaceB\n{\n" +
+            "    [FastClonerClonable]\n" +
+            "    public sealed class Container\n    {\n        " +
+            members +
+            "\n    }\n}\n";
+
+        (ImmutableArray<Diagnostic> _, ImmutableArray<Diagnostic> compilationDiags) = RunGeneratorAndCompile(source);
+
+        List<Diagnostic> errors = compilationDiags.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+        await Assert.That(errors).IsEmpty().Because(
+            $"Scenario '{scenario}': generated clone helpers must resolve FastDeepClone for clonables in another namespace. " +
+            $"Found: {string.Join("; ", errors.Select(d => $"{d.Id}: {d.GetMessage()}"))}");
+    }
+
+    [Test]
+    public async Task Issue57_GeneratedHelper_Must_Not_Use_ExtensionMethod_Syntax()
+    {
+        string source = """
+            #nullable enable
+            using FastCloner.SourceGenerator.Shared;
+            using System.Collections.Generic;
+
+            namespace Repro.NamespaceA
+            {
+                [FastClonerClonable]
+                public sealed record Value
+                {
+                    public string Text { get; init; } = string.Empty;
+                }
+            }
+
+            namespace Repro.NamespaceB
+            {
+                [FastClonerClonable]
+                public sealed class Container
+                {
+                    public Dictionary<int, global::Repro.NamespaceA.Value?>? Items { get; set; }
+                    public global::Repro.NamespaceA.Value?[]? Values { get; set; }
+                }
+            }
+            """;
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string combined = string.Join("\n", generated.Select(g => g.Text));
+
+        await Assert.That(combined).DoesNotContain("?.FastDeepClone()").Because(
+            "helpers must not call FastDeepClone as an extension method; it is unresolvable across namespaces (issue #57)");
+        await Assert.That(combined).Contains("global::Repro.NamespaceA.ValueFastDeepCloneExtensions.InternalFastDeepClone");
+    }
+
+    #endregion
+
     #region Polymorphic attribute validation
 
     [Test]

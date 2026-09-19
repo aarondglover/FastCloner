@@ -512,4 +512,14 @@ internal static class MemberCloneGenerator
     {
         return member.ElementClonableExtensionClass!;
     }
+
+    /// <summary>
+    /// Emits a fully-qualified static call to a generated clonable's InternalFastDeepClone.
+    /// Extension-method syntax (<c>x.FastDeepClone()</c>) is never used: it only resolves when
+    /// the extension class's namespace is imported, which generated helpers do not do (issue #57).
+    /// </summary>
+    public static string GetClonableCloneExpression(string extensionClassFqn, string sourceExpression, string stateArg)
+    {
+        return $"{extensionClassFqn}.InternalFastDeepClone({sourceExpression}, {stateArg})!";
+    }
 }

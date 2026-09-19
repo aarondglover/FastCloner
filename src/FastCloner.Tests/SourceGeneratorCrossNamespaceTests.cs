@@ -41,6 +41,38 @@ namespace FastCloner.Tests
         public NestedSubModel? Nested { get; set; }
         public int Code { get; set; }
     }
+
+    // Issue #57: collection/dictionary helpers must resolve FastDeepClone for
+    // [FastClonerClonable] element/key/value types declared in another namespace.
+    [FastClonerClonable]
+    public class CrossNamespaceDictionaryContainer
+    {
+        public Dictionary<int, SubModelItem?>? Items { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class CrossNamespaceHashSetContainer
+    {
+        public HashSet<SubModelItem?>? Items { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class CrossNamespaceArrayContainer
+    {
+        public SubModelItem?[]? Items { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class CrossNamespaceMultiDimArrayContainer
+    {
+        public SubModelItem?[,]? Items { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class CrossNamespaceDictionaryKeyContainer
+    {
+        public Dictionary<SubModelItem, int>? Items { get; set; }
+    }
     public class SourceGeneratorCrossNamespaceTests
     {
         [Test]
@@ -145,6 +177,105 @@ namespace FastCloner.Tests
 
             clone.Nested.Child.Label = "Modified";
             await Assert.That(original.Nested.Child!.Label).IsEqualTo("Deep");
+        }
+
+        [Test]
+        [SourceGeneratorCompatible]
+        public async Task CrossNamespace_Dictionary_Value_Should_Deep_Clone()
+        {
+            CrossNamespaceDictionaryContainer original = new CrossNamespaceDictionaryContainer
+            {
+                Items = new Dictionary<int, SubModelItem?>
+                {
+                    [1] = new SubModelItem { Id = 1, Label = "abc" },
+                    [2] = null
+                }
+            };
+
+            CrossNamespaceDictionaryContainer clone = original.FastDeepClone();
+
+            await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+            await Assert.That(clone.Items![1]!.Label).IsEqualTo("abc");
+            await Assert.That(clone.Items[1]).IsNotSameReferenceAs(original.Items![1]);
+            await Assert.That(clone.Items[2]).IsNull();
+
+            clone.Items[1]!.Label = "modified";
+            await Assert.That(original.Items[1]!.Label).IsEqualTo("abc");
+        }
+
+        [Test]
+        [SourceGeneratorCompatible]
+        public async Task CrossNamespace_HashSet_Should_Deep_Clone_Elements()
+        {
+            SubModelItem kept = new SubModelItem { Id = 7, Label = "kept" };
+            CrossNamespaceHashSetContainer original = new CrossNamespaceHashSetContainer
+            {
+                Items = [new SubModelItem { Id = 1, Label = "a" }, null, kept]
+            };
+
+            CrossNamespaceHashSetContainer clone = original.FastDeepClone();
+
+            await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+            await Assert.That(clone.Items!.Count).IsEqualTo(3);
+            await Assert.That(clone.Items.Contains(null)).IsTrue();
+            await Assert.That(clone.Items.Any(x => x?.Label == "kept")).IsTrue();
+            await Assert.That(clone.Items.Any(x => ReferenceEquals(x, kept))).IsFalse();
+        }
+
+        [Test]
+        [SourceGeneratorCompatible]
+        public async Task CrossNamespace_Array_Should_Deep_Clone_Elements()
+        {
+            CrossNamespaceArrayContainer original = new CrossNamespaceArrayContainer
+            {
+                Items = [new SubModelItem { Id = 3, Label = "arr" }, null]
+            };
+
+            CrossNamespaceArrayContainer clone = original.FastDeepClone();
+
+            await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+            await Assert.That(clone.Items![0]!.Label).IsEqualTo("arr");
+            await Assert.That(clone.Items[0]).IsNotSameReferenceAs(original.Items![0]);
+            await Assert.That(clone.Items[1]).IsNull();
+        }
+
+        [Test]
+        [SourceGeneratorCompatible]
+        public async Task CrossNamespace_MultiDimArray_Should_Deep_Clone_Elements()
+        {
+            CrossNamespaceMultiDimArrayContainer original = new CrossNamespaceMultiDimArrayContainer
+            {
+                Items = new SubModelItem?[2, 2]
+            };
+            original.Items[0, 0] = new SubModelItem { Id = 4, Label = "md" };
+
+            CrossNamespaceMultiDimArrayContainer clone = original.FastDeepClone();
+
+            await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+            await Assert.That(clone.Items![0, 0]!.Label).IsEqualTo("md");
+            await Assert.That(clone.Items[0, 0]).IsNotSameReferenceAs(original.Items![0, 0]);
+            await Assert.That(clone.Items[1, 1]).IsNull();
+        }
+
+        [Test]
+        [SourceGeneratorCompatible]
+        public async Task CrossNamespace_Dictionary_Key_Should_Deep_Clone()
+        {
+            SubModelItem key = new SubModelItem { Id = 9, Label = "key" };
+            CrossNamespaceDictionaryKeyContainer original = new CrossNamespaceDictionaryKeyContainer
+            {
+                Items = new Dictionary<SubModelItem, int> { [key] = 42 }
+            };
+
+            CrossNamespaceDictionaryKeyContainer clone = original.FastDeepClone();
+
+            await Assert.That(clone.Items).IsNotSameReferenceAs(original.Items);
+            await Assert.That(clone.Items!.Count).IsEqualTo(1);
+            SubModelItem clonedKey = clone.Items.Keys.Single();
+            await Assert.That(clonedKey.Id).IsEqualTo(9);
+            await Assert.That(clonedKey.Label).IsEqualTo("key");
+            await Assert.That(clonedKey).IsNotSameReferenceAs(key);
+            await Assert.That(clone.Items.Values.Single()).IsEqualTo(42);
         }
     }
 }

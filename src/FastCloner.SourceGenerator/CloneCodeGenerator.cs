@@ -259,7 +259,7 @@ internal sealed class CloneCodeGenerator
         string returnTypeSuffix = isStruct ? "" : "?";
         string paramTypeSuffix = (isStruct || trustNullability) ? "" : "?";
 
-        sb.AppendLine($"        internal static {typeName}{returnTypeSuffix} InternalFastDeepClone{typeParams}(this {typeName}{paramTypeSuffix} source, FcGeneratedCloneState? state){constraints}");
+        sb.AppendLine($"        internal static {typeName}{returnTypeSuffix} InternalFastDeepClone{typeParams}(this {typeName}{paramTypeSuffix} source, {GeneratedTypeNames.CloneState}? state){constraints}");
         sb.AppendLine("        {");
         
         bool hasInitOnlyWithCycles = _context.CanHaveCircularReferences && _context.Model.Members.Any(m => m.IsInitOnly);
@@ -291,7 +291,7 @@ internal sealed class CloneCodeGenerator
         else if (_context.NeedsStateTracking)
         {
             _context.NeedsStateClass = true;
-            sb.AppendLine("            var localState = state ?? new FcGeneratedCloneState();");
+            sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
 
             if (!_context.Model.IsStruct)
             {
@@ -394,7 +394,7 @@ internal sealed class CloneCodeGenerator
         if (_context.NeedsStateTracking)
         {
             _context.NeedsStateClass = true;
-            sb.AppendLine("            var localState = new FcGeneratedCloneState();");
+            sb.AppendLine($"            var localState = new {GeneratedTypeNames.CloneState}();");
             sb.AppendLine("            var known = localState.GetKnownRef(source);");
             sb.AppendLine($"            if (known != null) return ({typeName})known;");
             sb.AppendLine();
@@ -444,7 +444,7 @@ internal sealed class CloneCodeGenerator
         if (_context.NeedsStateTracking)
         {
             _context.NeedsStateClass = true;
-            sb.AppendLine("            var localState = state ?? new FcGeneratedCloneState();");
+            sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
             sb.AppendLine("            var known = localState.GetKnownRef(source);");
             sb.AppendLine($"            if (known != null) return ({typeName})known;");
             sb.AppendLine();
@@ -532,13 +532,13 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine($"        /// <summary>");
             sb.AppendLine($"        /// Clones a {derivedModel.Name} instance (auto-generated for abstract base class).");
             sb.AppendLine($"        /// </summary>");
-            sb.AppendLine($"        private static {derivedModel.FullyQualifiedName} {methodName}{helperTypeParams}({derivedModel.FullyQualifiedName} source, FcGeneratedCloneState? state)");
+            sb.AppendLine($"        private static {derivedModel.FullyQualifiedName} {methodName}{helperTypeParams}({derivedModel.FullyQualifiedName} source, {GeneratedTypeNames.CloneState}? state)");
             sb.AppendLine("        {");
             
             if (derivedModel.NeedsStateTracking)
             {
                 _context.NeedsStateClass = true;
-                sb.AppendLine("            var localState = state ?? new FcGeneratedCloneState();");
+                sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
                 sb.AppendLine("            var known = localState.GetKnownRef(source);");
                 sb.AppendLine($"            if (known != null) return ({derivedModel.FullyQualifiedName})known;");
                 sb.AppendLine();
@@ -755,7 +755,7 @@ internal sealed class CloneCodeGenerator
         {
             sb.AppendLine($"        private static class Cloner<T>");
             sb.AppendLine("        {");
-            sb.AppendLine("            public static T Clone(T source, FcGeneratedCloneState? state)");
+            sb.AppendLine($"            public static T Clone(T source, {GeneratedTypeNames.CloneState}? state)");
         }
         else
         {
@@ -763,7 +763,7 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine("        {");
 
             string firstTypeParam = typeParamsArray[0];
-            sb.AppendLine($"            public static {firstTypeParam} Clone({firstTypeParam} source, FcGeneratedCloneState? state)");
+            sb.AppendLine($"            public static {firstTypeParam} Clone({firstTypeParam} source, {GeneratedTypeNames.CloneState}? state)");
         }
         
         sb.AppendLine("            {");
