@@ -9,14 +9,22 @@ namespace FastCloner.SourceGenerator;
 /// The outcome of expanding identity requirements over the generated graph.
 /// <br/><br/>
 /// <paramref name="Capability"/> names every type that must be able to honor a supplied tracking
-/// state, and <paramref name="Required"/> every type for which that state is a <em>hard</em>
-/// requirement coming from a <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c>
-/// surface. The two differ: a type can be capable without anyone requiring the operation, but a
-/// required type must be able to serve it or say why not.
+/// state, <paramref name="Required"/> every type for which that state is a <em>hard</em> requirement
+/// (including the ones reached transitively, because a parent guarantee depends on them), and
+/// <paramref name="Direct"/> only the types a
+/// <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c> surface named itself.
+/// <br/><br/>
+/// The three are deliberately separate: capability is internal, <paramref name="Required"/> is what
+/// must be reported when it cannot be supplied, and <paramref name="Direct"/> - together with the
+/// type's own identity configuration - is what decides whether the type gains the public
+/// <c>FastDeepClone(FastCloneOptions)</c> overload. A type that is only capable, or only required
+/// because another root's graph reaches it, keeps its internal state machinery and gains no new
+/// public API.
 /// </summary>
 internal readonly record struct IdentityRequirementSet(
     EquatableArray<string> Capability,
-    EquatableArray<string> Required);
+    EquatableArray<string> Required,
+    EquatableArray<string> Direct);
 
 /// <summary>
 /// Expands identity-preservation capability requirements over the generated graph.
@@ -50,6 +58,7 @@ internal static class IdentityCapabilityRequirements
 
         HashSet<string> capability = new(StringComparer.Ordinal);
         HashSet<string> required = new(StringComparer.Ordinal);
+        HashSet<string> direct = new(StringComparer.Ordinal);
         Queue<string> pendingCapability = new();
         Queue<string> pendingRequired = new();
 
@@ -77,13 +86,28 @@ internal static class IdentityCapabilityRequirements
                 RequireCapability(model.FullyQualifiedName);
         }
 
+        // Direct requirements: what the surface named itself. These are never propagated, so the
+        // public operation-level API is only offered where someone actually asked for it.
         foreach (string typeName in discovery.IdentityPreservationRequirements)
+        {
+            direct.Add(typeName);
             RequireOperation(typeName);
+        }
 
         foreach (DiscoveredGenericRoot root in discovery.Roots)
         {
-            if (root.Model is { IdentityPreservationRequired: true } model)
+            if (root.Model is not { } model)
+                continue;
+
+            if (model.ExplicitIdentityOperationRequested)
+            {
+                direct.Add(model.FullyQualifiedName);
                 RequireOperation(model.FullyQualifiedName);
+            }
+            else if (model.IdentityPreservationRequired)
+            {
+                RequireOperation(model.FullyQualifiedName);
+            }
         }
 
         while (pendingCapability.Count > 0 || pendingRequired.Count > 0)
@@ -121,7 +145,8 @@ internal static class IdentityCapabilityRequirements
 
         return new IdentityRequirementSet(
             new EquatableArray<string>(capability.OrderBy(static name => name, StringComparer.Ordinal).ToArray()),
-            new EquatableArray<string>(required.OrderBy(static name => name, StringComparer.Ordinal).ToArray()));
+            new EquatableArray<string>(required.OrderBy(static name => name, StringComparer.Ordinal).ToArray()),
+            new EquatableArray<string>(direct.OrderBy(static name => name, StringComparer.Ordinal).ToArray()));
     }
 
     /// <summary>

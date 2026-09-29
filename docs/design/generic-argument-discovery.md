@@ -234,7 +234,9 @@ Tests should cover at least:
 - the generated-to-generated state transitions (non-public members, `Cloner<T>` for an included clonable argument,
   a collection of the root's own type parameter) keeping one tracking state;
 - a requirement that cannot be served being reported (`FCG013`) with the operation-level entry point withheld, and
-  a graph that can be served exposing it with no runtime-cloner escape path.
+  a graph that can be served exposing it with no runtime-cloner escape path;
+- the exposure distinction: a cycle-only root and a transitively capable type do not gain the overload, a directly
+  named or identity-configured root does, and the transitive type still honors the parent's preserving state.
 
 ## Implementation notes
 
@@ -308,9 +310,29 @@ shape, speed and allocation profile.
 The capability is requested by:
 
 1. `NeedsStateTracking` (the type's own cycles/identity configuration already tracks — the capability is free),
-2. any `[FastClonerPreserveIdentity]` on the type (an explicit identity configuration is exactly the case where
-   the operation-level override needs to be available and accurate), and
-3. a `PreserveIdentity = true` discovery surface.
+2. any `[FastClonerPreserveIdentity]` on the type or one of its members, and
+3. a `PreserveIdentity = true` discovery surface — directly, or because a required parent's graph reaches this type.
+
+Note that (1) and (3)-through-a-parent are capability only; see the next section for what additionally decides the
+public API surface.
+
+### Four separate concepts
+
+Keeping these apart is what stops the feature from leaking public API surface:
+
+| Concept | Field | Meaning |
+|---|---|---|
+| default behaviour | `TypeModel.NeedsStateTracking`, `PreserveIdentity` | what `FastDeepClone()` does; untouched by everything below |
+| internal state capability | `TypeModel.SupportsStateTracking` | this generated type/helper can accept and correctly propagate an `FcGeneratedCloneState` supplied by a containing preserving operation |
+| hard preserving requirement | `TypeModel.IdentityPreservationRequired` | a `PreserveIdentity = true` surface needs a graph-wide guarantee from this type, directly or because a required parent's graph reaches it |
+| public operation exposure | `TypeModel.ExplicitIdentityOperationRequested` + local `[FastClonerPreserveIdentity]`, exposed as `CloneGeneratorContext.ExposesIdentityOperation` | this root itself has a reason to offer `FastDeepClone(FastCloneOptions)` |
+
+Capability legitimately arises for a type that only tracks state for cycles, or because another root's graph reaches
+it. Requirement legitimately propagates through a parent's graph, because the parent's guarantee would otherwise be
+false. Neither is a reason for a new public API on that type, which is why exposure is derived from the
+*originating* requirement only. `IdentityCapabilityRequirements.Expand` therefore returns three separate sets —
+capability, required, and direct — and only the direct set (plus local identity configuration) drives
+`ExposesIdentityOperation`.
 
 ### Operation-level override
 
@@ -323,11 +345,13 @@ The generated overload delegates to the existing entry point when the option is 
 request the strongest requirement for that invocation: topology is preserved whether the type's default preserves or
 not.
 
-The overload is emitted **only when the generated graph proves it can carry one tracking state across everything it
-deep clones**. Two things can withhold it:
+The overload is emitted **only when the root exposes the operation *and* the generated graph proves it can carry one
+tracking state across everything it deep clones**. Three things can withhold it:
 
-- a part of the graph that necessarily delegates to the runtime cloner (see *Generated/runtime boundary* below), or
-- the root not being state capable at all.
+- the root has no reason of its own to expose the API (cycles only, or a transitively capable helper) — it keeps
+  accepting a parent's state, it just grows no new public surface;
+- a part of the graph necessarily delegates to the runtime cloner (see *Generated/runtime boundary* below); or
+- the root is not state capable at all.
 
 So the contract is unconditional for every surface on which the call compiles:
 
@@ -335,8 +359,7 @@ So the contract is unconditional for every surface on which the call compiles:
 > operation actually deep clones.
 
 A caller cannot obtain a clone that ignores the requirement: where the guarantee cannot be met the call does not
-compile, and — for a requirement or a configured identity — the generator says why instead of leaving it to
-guesswork (`FCG013`, `FCG014`).
+compile, and an unsatisfied *requirement* is reported (`FCG013`) instead of leaving it to guesswork.
 
 The state carries `FcGeneratedCloneState.IsPreservingOperation` so the *shape* decision (does a helper take a state
 at all?) stays separable from the *call-site* decision (is the state handed over?). `state != null` alone is not
@@ -411,7 +434,12 @@ are deduplicated by fully qualified name and the capability flag is OR-ed.
 
 If the discovered type is already `[FastClonerClonable]`, discovery does not skip the requirement and does not
 emit a second root: the requirement is carried as an FQN-keyed requirement and OR-ed into the model produced by
-the clonable pipeline before code generation.
+the clonable pipeline before code generation. That is also how exposure reaches an already-clonable type: the
+surface *names* it, so it is in the direct set and gains the overload, while the types its graph reaches only gain
+the capability (and the requirement, so a broken guarantee is still reported).
+
+Capability, requirement and exposure are all unions, never contests — a type reached by several surfaces gets each
+of them once.
 
 ### Generated/runtime boundary
 
@@ -451,20 +479,23 @@ which gives two guarantees:
 
 - **The operation is withheld.** The options overload is only emitted when no boundary was recorded, so a supported
   preserving operation has no known generated-state escape path.
-- **The requirement is reported.** A root that must support the operation gets a diagnostic instead of a silent
-  best-effort implementation:
+- **A hard requirement is reported.** A type that must support the operation gets an error instead of a silent
+  best-effort implementation.
 
   | ID | Severity | Raised when |
   |----|----------|-------------|
-  | `FCG013` | Error | a `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]` requirement cannot be supplied for a type, because its graph necessarily delegates to the runtime cloner |
-  | `FCG014` | Warning | a type that configures identity itself (`[FastClonerPreserveIdentity]` on the type or a member) has the same boundary; the runtime fallback for that member is pre-existing behavior, so this is reported rather than broken |
+  | `FCG013` | Error | a `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]` requirement cannot be supplied for a type — directly or as part of a required graph — because its graph necessarily delegates to the runtime cloner |
+
+  There is deliberately **no diagnostic** for a type that merely configures `[FastClonerPreserveIdentity]`: that
+  predates the new operation-level API, its `FastDeepClone()` behavior is unchanged, and the overload is simply not
+  added. Warning there would be build noise for consumers who never requested the API.
 
   Roots that never requested identity preservation (including roots that only track state for circular references)
-  get neither diagnostic and keep their existing generated output.
+  get neither diagnostic nor change, and keep their existing generated output.
 
 ### Future option: bridging the runtime state
 
-`FCG013`/`FCG014` make the contract honest without a runtime change, but they cannot make an `object`-typed or
+`FCG013` makes the contract honest without a runtime change, but it cannot make an `object`-typed or
 custom-handler subgraph participate. Closing that would need, roughly:
 
 - `FcGeneratedCloneState` able to expose (or be built around) the runtime `FastCloneState`'s known-reference map;

@@ -324,6 +324,7 @@ internal static class TypeModelFactory
             targetFramework,
             new EquatableArray<string>(circRefLog.ToArray()),
             supportsStateTracking,
+            requiresIdentityPreservationCapability,
             requiresIdentityPreservationCapability);
 
         return true;

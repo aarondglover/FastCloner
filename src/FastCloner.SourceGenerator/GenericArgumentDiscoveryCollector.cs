@@ -184,7 +184,9 @@ internal static class GenericArgumentDiscoveryCollector
                     continue;
                 }
 
-                if (root.Model is { SupportsStateTracking: true } && existing.Model is { SupportsStateTracking: false })
+                if (root.Model is { ExplicitIdentityOperationRequested: true } && existing.Model is { ExplicitIdentityOperationRequested: false })
+                    roots[key] = root;
+                else if (root.Model is { SupportsStateTracking: true } && existing.Model is { SupportsStateTracking: false })
                     roots[key] = root;
             }
         }

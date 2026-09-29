@@ -40,8 +40,6 @@ internal sealed class CloneCodeGenerator
 
     public bool IdentityPreservationRequired => _context.IdentityPreservationRequired;
 
-    public bool ConfiguresIdentity => _context.ConfiguresIdentity;
-
     private void PreAnalyzeHelperUsages()
     {
         AnalyzeMembers(_context.Model.Members);
@@ -294,14 +292,21 @@ internal sealed class CloneCodeGenerator
     /// single call. The default entry point above keeps its existing behavior and fast path: a
     /// tracking state is only allocated when the caller asks for it, so ordinary calls pay nothing.
     /// <br/><br/>
-    /// The entry point is only offered when generating the rest of the file proved the graph can
-    /// carry one tracking state across everything it deep clones. If some part of the graph
-    /// necessarily delegates to the runtime cloner (which runs its own state), the call is not
-    /// offered at all: a caller cannot silently receive a clone that ignores the requirement.
+    /// Two conditions decide whether it is offered at all:
+    /// <br/><br/>
+    /// - this root has a reason of its own to expose the operation
+    ///   (<see cref="CloneGeneratorContext.ExposesIdentityOperation"/>): it is directly required by a
+    ///   <c>PreserveIdentity = true</c> discovery surface, or it configures identity itself. Merely
+    ///   being state capable — for cycles, or because another preserving root's graph reaches it —
+    ///   is not a reason; and
+    /// - generating the rest of the file proved the graph can carry one tracking state across
+    ///   everything it deep clones. If some part necessarily delegates to the runtime cloner (which
+    ///   runs its own state), the call is not offered: a caller cannot silently receive a clone that
+    ///   ignores the requirement.
     /// </summary>
     private void WritePublicFastDeepCloneWithOptionsMethod(string typeName)
     {
-        if (!_context.StateCapable || _context.RuntimeBoundaryReasons.Count > 0)
+        if (!_context.ExposesIdentityOperation || !_context.StateCapable || _context.RuntimeBoundaryReasons.Count > 0)
             return;
 
         StringBuilder sb = _context.Source;

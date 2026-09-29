@@ -166,14 +166,16 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                     return result;
 
                 bool required = requirements.Required.Contains(model.FullyQualifiedName);
+                bool direct = requirements.Direct.Contains(model.FullyQualifiedName);
 
-                if (!required && !requirements.Capability.Contains(model.FullyQualifiedName))
+                if (!required && !direct && !requirements.Capability.Contains(model.FullyQualifiedName))
                     return result;
 
                 return Result<TypeModel>.Success(model with
                 {
                     SupportsStateTracking = true,
-                    IdentityPreservationRequired = model.IdentityPreservationRequired || required
+                    IdentityPreservationRequired = model.IdentityPreservationRequired || required,
+                    ExplicitIdentityOperationRequested = model.ExplicitIdentityOperationRequested || direct
                 });
             });
 
@@ -188,20 +190,20 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                     return root;
 
                 bool required = requirements.Required.Contains(model.FullyQualifiedName);
+                bool direct = requirements.Direct.Contains(model.FullyQualifiedName);
 
-                if (model.SupportsStateTracking &&
-                    (!required || model.IdentityPreservationRequired))
+                if ((!required || model.IdentityPreservationRequired) &&
+                    (!direct || model.ExplicitIdentityOperationRequested) &&
+                    (model.SupportsStateTracking || !requirements.Capability.Contains(model.FullyQualifiedName)))
                 {
                     return root;
                 }
 
-                if (!required && !requirements.Capability.Contains(model.FullyQualifiedName))
-                    return root;
-
                 return new DiscoveredGenericRoot(model with
                 {
                     SupportsStateTracking = true,
-                    IdentityPreservationRequired = model.IdentityPreservationRequired || required
+                    IdentityPreservationRequired = model.IdentityPreservationRequired || required,
+                    ExplicitIdentityOperationRequested = model.ExplicitIdentityOperationRequested || direct
                 });
             });
 

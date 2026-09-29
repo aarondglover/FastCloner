@@ -45,7 +45,13 @@ internal sealed record TypeModel(
     // surface (directly or through another required type's graph) needs this root to be able to serve
     // an explicit identity-preserving operation for its whole graph. When it cannot, the operation is
     // withheld and the requirement is reported instead of being silently downgraded.
-    bool IdentityPreservationRequired = false) : IEquatable<TypeModel>
+    bool IdentityPreservationRequired = false,
+    // Public API exposure, which is a different question from capability: this root itself has a
+    // reason to offer FastDeepClone(FastCloneOptions), because a PreserveIdentity = true discovery
+    // surface named it directly. Set for the originating requirement only - never for a type that
+    // merely became capable because another root's graph reaches it. The type's own identity
+    // configuration is the other exposure reason and is read from the model's members/attributes.
+    bool ExplicitIdentityOperationRequested = false) : IEquatable<TypeModel>
 {
     /// <summary>
     /// True when <paramref name="typeName"/> is the root's only type parameter, i.e. the exact shape

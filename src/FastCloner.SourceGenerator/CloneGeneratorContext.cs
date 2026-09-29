@@ -35,10 +35,10 @@ internal sealed class CloneGeneratorContext
 
     /// <summary>
     /// True when a <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c> surface
-    /// requires this root to serve an explicit identity-preserving operation for its whole graph.
-    /// Unlike <see cref="StateCapable"/> this is a hard requirement: if the graph necessarily
-    /// delegates part of itself to the runtime cloner, the operation is withheld and the requirement
-    /// is reported.
+    /// requires this root to serve an explicit identity-preserving operation for its whole graph
+    /// (directly, or because another required root's graph reaches it). Unlike
+    /// <see cref="StateCapable"/> this is a hard requirement: if the graph necessarily delegates part
+    /// of itself to the runtime cloner, the operation is withheld and the requirement is reported.
     /// </summary>
     public bool IdentityPreservationRequired => Model.IdentityPreservationRequired;
 
@@ -48,6 +48,18 @@ internal sealed class CloneGeneratorContext
     /// </summary>
     public bool ConfiguresIdentity => Model.PreserveIdentity.HasValue ||
                                       Model.Members.Any(static member => member.PreserveIdentity.HasValue);
+
+    /// <summary>
+    /// Whether this root offers the public <c>FastDeepClone(FastCloneOptions)</c> entry point. This is
+    /// deliberately distinct from <see cref="StateCapable"/> (the internal capability to honor a
+    /// supplied state) and from <see cref="IdentityPreservationRequired"/> (which also covers
+    /// requirements propagated through a parent's graph):
+    /// <br/><br/>
+    /// - a cycle-tracking root is state capable but never asked for the operation;
+    /// - a type that only became capable because another preserving root calls its generated cloner
+    ///   must accept and honor that state, but has no reason to grow a new public API.
+    /// </summary>
+    public bool ExposesIdentityOperation => Model.ExplicitIdentityOperationRequested || ConfiguresIdentity;
 
     /// <summary>
     /// Reasons why this generated graph cannot carry one tracking state across everything it deep
