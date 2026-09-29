@@ -178,6 +178,23 @@ The implementation should preferably feed discovered types into the same model-b
 
 The exact Roslyn pipeline shape should be chosen to preserve FastCloner's current incremental-generation characteristics.
 
+## Repository conventions
+
+Implementation should follow the repository's existing conventions rather than introduce a parallel style or toolchain.
+
+In particular:
+
+- use the existing TUnit test infrastructure and assertion style in `src/FastCloner.Tests`;
+- do not add or replace test frameworks or supporting test packages unless the feature genuinely requires something not already available;
+- reuse the existing source-generator project structure and shared attribute assembly rather than creating new projects for this feature;
+- preserve the current target-framework strategy, nullable settings, language-version choices, signing and packaging conventions;
+- follow the repository's existing naming, file placement, namespace, generated-code and incremental-generator patterns;
+- prefer extending existing collectors, models and code-generation paths over introducing duplicate discovery or modelling pipelines;
+- avoid unrelated package upgrades, formatting churn or refactors;
+- keep the implementation narrowly scoped to the discovery feature and its required tests/documentation.
+
+If an implementation choice conflicts with this document but is clearly required by an established repository convention, follow the repository convention and document the reason.
+
 ## Validation
 
 Tests should cover at least:
