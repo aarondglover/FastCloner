@@ -40,7 +40,7 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Clonable:
                     {
                         string extensionClassName = GetExtensionClassName(member);
-                        return $"{memberName} = {extensionClassName}.InternalFastDeepClone({sourceVar}.{memberName}, {stateVar}){nf}";
+                        return $"{memberName} = {extensionClassName}.InternalFastDeepClone({sourceVar}.{memberName}, {GetMemberStateVar(member, stateVar)}){nf}";
                     }
                     case MemberTypeKind.Implicit:
                     {
@@ -49,8 +49,9 @@ internal static class MemberCloneGenerator
                         {
                             bool inlineModelDefault = implicitModel.NeedsStateTracking;
                             bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
-                            bool inlineShouldPassState = inlineMemberNeedsState || (stateVar != "null");
-                            string inlineActualStateVar = inlineShouldPassState ? stateVar : "null";
+                            bool inlineAcceptsState = context.HelperAcceptsState(member.TypeFullName);
+                            bool inlineShouldPassState = inlineMemberNeedsState || inlineAcceptsState || (stateVar != "null");
+                            string inlineActualStateVar = inlineShouldPassState ? GetMemberStateVar(member, stateVar) : "null";
 
                             return $"{memberName} = {GetImplicitCloneExpression(context, implicitModel, $"{sourceVar}.{memberName}", inlineActualStateVar, indent, member.IsNullable)}{nf}";
                         }
@@ -61,8 +62,9 @@ internal static class MemberCloneGenerator
                         bool modelDefault = implicitModel?.NeedsStateTracking ?? false;
                         bool memberNeedsState = context.NeedsCircularState(member.TypeFullName, modelDefault) && context.NeedsStateTracking;
                         bool isRegisteredType = helperMethodName == "Clone";
-                        bool shouldPassState = memberNeedsState || (isRegisteredType && stateVar != "null");
-                        string actualStateVar = shouldPassState ? stateVar : "null";
+                        bool helperTakesState = context.HelperTakesState(helperMethodName, member.TypeFullName, memberNeedsState);
+                        bool shouldPassState = helperTakesState || (isRegisteredType && stateVar != "null");
+                        string actualStateVar = shouldPassState ? GetMemberStateVar(member, stateVar) : "null";
 
                         return $"{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", shouldPassState, actualStateVar)}{nf}";
                     }
@@ -72,16 +74,21 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.MultiDimArray:
                     {
                         string helperMethodName = context.GetOrCreateHelperMethodName(member);
-                        bool memberNeedsState = MemberNeedsCircularRefTracking(context, member);
-                        string actualStateVar = memberNeedsState ? stateVar : "null";
-                        
-                        return $"{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", memberNeedsState, actualStateVar)}{nf}";
+                        bool helperTakesState = context.HelperAcceptsState(member.TypeFullName);
+                        string actualStateVar = helperTakesState ? GetMemberStateVar(member, stateVar) : "null";
+
+                        return $"{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", helperTakesState, actualStateVar)}{nf}";
                     }
                     case MemberTypeKind.Object:
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
                         // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
+                        // The ambient state is forwarded unchanged: this member's type is not cloned by
+                        // generated code at all — Cloner<T> ends in the runtime cloner, which tracks
+                        // references on its own terms and ignores the state it is handed. A member-level
+                        // [FastClonerPreserveIdentity] override therefore cannot apply here, so no
+                        // no-tracking state is passed (see the attribute docs).
                         return $"{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}!, {stateVar}){nf}";
                 }
         }
@@ -179,7 +186,7 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Clonable:
                     {
                         string extensionClassName = GetExtensionClassName(member);
-                        sb.AppendLine($"            {resultVar}.{memberName} = {extensionClassName}.InternalFastDeepClone({sourceVar}.{memberName}, {stateVar}){nf};");
+                        sb.AppendLine($"            {resultVar}.{memberName} = {extensionClassName}.InternalFastDeepClone({sourceVar}.{memberName}, {GetMemberStateVar(member, stateVar)}){nf};");
                     }
                         break;
 
@@ -190,8 +197,9 @@ internal static class MemberCloneGenerator
                         {
                             bool inlineModelDefault = implicitModel.NeedsStateTracking;
                             bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
-                            bool inlineShouldPassState = inlineMemberNeedsState || (stateVar != "null");
-                            string inlineActualStateVar = inlineShouldPassState ? stateVar : "null";
+                            bool inlineAcceptsState = context.HelperAcceptsState(member.TypeFullName);
+                            bool inlineShouldPassState = inlineMemberNeedsState || inlineAcceptsState || (stateVar != "null");
+                            string inlineActualStateVar = inlineShouldPassState ? GetMemberStateVar(member, stateVar) : "null";
 
                             sb.AppendLine(GetImplicitCloneStatement(context, implicitModel, member.Name, resultVar, sourceVar, inlineActualStateVar, member.IsNullable));
                             break;
@@ -202,8 +210,9 @@ internal static class MemberCloneGenerator
                         bool modelDefault = implicitModel?.NeedsStateTracking ?? false;
                         bool memberNeedsState = context.NeedsCircularState(member.TypeFullName, modelDefault) && context.NeedsStateTracking;
                         bool isRegisteredType = helperMethodName == "Clone";
-                        bool shouldPassState = memberNeedsState || (isRegisteredType && stateVar != "null");
-                        string actualStateVar = shouldPassState ? stateVar : "null";
+                        bool helperTakesState = context.HelperTakesState(helperMethodName, member.TypeFullName, memberNeedsState);
+                        bool shouldPassState = helperTakesState || (isRegisteredType && stateVar != "null");
+                        string actualStateVar = shouldPassState ? GetMemberStateVar(member, stateVar) : "null";
                 
                         sb.AppendLine($"            {resultVar}.{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", shouldPassState, actualStateVar)}{nf};");
                     }
@@ -215,9 +224,9 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.MultiDimArray:
                     {
                         string helperMethodName = context.GetOrCreateHelperMethodName(member);
-                        bool memberNeedsState = MemberNeedsCircularRefTracking(context, member);
-                        string actualStateVar = memberNeedsState ? stateVar : "null";
-                        sb.AppendLine($"            {resultVar}.{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", memberNeedsState, actualStateVar)}{nf};");
+                        bool helperTakesState = context.HelperAcceptsState(member.TypeFullName);
+                        string actualStateVar = helperTakesState ? GetMemberStateVar(member, stateVar) : "null";
+                        sb.AppendLine($"            {resultVar}.{memberName} = {GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", helperTakesState, actualStateVar)}{nf};");
                     }
                         break;
 
@@ -269,10 +278,10 @@ internal static class MemberCloneGenerator
         else
         {
             string helperMethodName = context.GetOrCreateHelperMethodName(member);
-            bool memberNeedsState = MemberNeedsCircularRefTracking(context, member);
-            string actualStateVar = memberNeedsState ? stateVar : "null";
+            bool helperTakesState = context.HelperAcceptsState(member.TypeFullName);
+            string actualStateVar = helperTakesState ? GetMemberStateVar(member, stateVar) : "null";
             string clonedVar = $"cloned_{context.GetNextVariableId()}";
-            string helperCall = GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", memberNeedsState, actualStateVar);
+            string helperCall = GetHelperMethodCall(context, helperMethodName, $"{sourceVar}.{memberName}", helperTakesState, actualStateVar);
             sb.AppendLine($"                var {clonedVar} = {helperCall};");
             sb.AppendLine($"                if ({clonedVar} != null)");
             sb.AppendLine("                {");
@@ -310,6 +319,27 @@ internal static class MemberCloneGenerator
         };
     }
     
+    /// <summary>
+    /// State argument handed to a nested cloner for a member's subgraph.
+    /// <br/><br/>
+    /// A member-level <c>[FastClonerPreserveIdentity(false)]</c> must beat the child type's own
+    /// <c>[FastClonerPreserveIdentity(true)]</c>, so such a member receives
+    /// <see cref="GeneratedTypeNames.NoTrackingCloneState"/> instead of the ambient state.
+    /// Forwarding the ambient state would track the member's subgraph through the parent's state,
+    /// and passing <c>null</c> would let the callee allocate its own tracking state — both re-enable
+    /// the identity preservation the member explicitly opted out of.
+    /// </summary>
+    internal static string GetMemberStateVar(MemberModel member, string stateVar)
+    {
+        return member.PreserveIdentity == false ? GeneratedTypeNames.NoTrackingCloneState : stateVar;
+    }
+
+    /// <summary>
+    /// Whether the type modelled by <paramref name="member"/> needs reference tracking for its own
+    /// default behaviour. A member-level <c>[FastClonerPreserveIdentity]</c> override is expressed
+    /// through the state argument (<see cref="GetMemberStateVar"/>) and the helper capability
+    /// (<see cref="CloneGeneratorContext.HelperAcceptsState"/>), not by this decision.
+    /// </summary>
     public static bool MemberNeedsCircularRefTracking(CloneGeneratorContext context, MemberModel member)
     {
         if (member.PreserveIdentity is not null)

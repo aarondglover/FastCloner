@@ -261,7 +261,7 @@ internal static class NonPublicAccessorEmitter
                 return $"{readExpression}!";
 
             case MemberTypeKind.Clonable:
-                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {stateVar})!";
+                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {MemberCloneGenerator.GetMemberStateVar(member, stateVar)})!";
             
             default:
                 if (context.IsFastClonerAvailable)

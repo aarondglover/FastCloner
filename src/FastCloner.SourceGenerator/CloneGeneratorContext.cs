@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -16,6 +17,7 @@ internal sealed class CloneGeneratorContext
     private readonly Dictionary<string, TypeModel> _derivedTypeHelpers = new Dictionary<string, TypeModel>();
     private readonly HashSet<string> _usedDerivedHelperMethodNames = new HashSet<string>();
     private readonly Dictionary<string, int> _helperUsageCounts = new Dictionary<string, int>();
+    private readonly Dictionary<string, bool> _helperAcceptsState = new Dictionary<string, bool>(StringComparer.Ordinal);
 
     public bool NeedsStateClass { get; set; }
     public bool NeedsClonerClass { get; set; }
@@ -31,7 +33,18 @@ internal sealed class CloneGeneratorContext
 
     private readonly Dictionary<string, bool> _circularReferenceOverrides = new Dictionary<string, bool>();
 
-    public CloneGeneratorContext(TypeModel model, BridgeContract? bridgeContract = null, Dictionary<string, string>? sharedMethodNames = null, HashSet<string>? sharedNeededHelpers = null)
+    /// <param name="additionalModels">
+    /// Models this context will clone that are not reachable through <see cref="TypeModel.RelatedTypes"/>
+    /// or <see cref="TypeModel.DerivedTypes"/> — currently the implicit models discovered from generic
+    /// usages. They take part in the identity opt-out scan so that capability is complete before the
+    /// first helper decision is taken.
+    /// </param>
+    public CloneGeneratorContext(
+        TypeModel model,
+        BridgeContract? bridgeContract = null,
+        Dictionary<string, string>? sharedMethodNames = null,
+        HashSet<string>? sharedNeededHelpers = null,
+        IEnumerable<TypeModel>? additionalModels = null)
     {
         Model = model;
         CanHaveCircularReferences = model.CanHaveCircularReferences;
@@ -57,6 +70,8 @@ internal sealed class CloneGeneratorContext
         {
             IndexTypeName(_implicitTypeModels, related.FullyQualifiedName, related, related.IsStruct);
         }
+
+        RequiresIdentityOptOutPropagation = ScanForIdentityOptOut(model, additionalModels);
         
         foreach (MemberModel nested in model.NestedTypes)
         {
@@ -92,6 +107,78 @@ internal sealed class CloneGeneratorContext
         return _typeNameToMemberModel.TryGetValue(typeName, out model);
     }
 
+    /// <summary>
+    /// Whether any member cloned through this context opts out of identity preservation with
+    /// <c>[FastClonerPreserveIdentity(false)]</c>.
+    /// <br/><br/>
+    /// Such an opt-out has to travel through the whole member subgraph, including helpers generated
+    /// for nested collection/array/dictionary/implicit levels, so every helper in the context must
+    /// be <i>able</i> to receive it. This is a capability, not a behaviour change: a helper whose
+    /// state argument is <c>null</c> behaves exactly as a helper generated without state ever did.
+    /// <br/><br/>
+    /// Finalized in the constructor over every model this context can reach — including the models
+    /// that only generic-usage analysis discovers — so capability never depends on discovery order.
+    /// </summary>
+    public bool RequiresIdentityOptOutPropagation { get; }
+
+    /// <summary>
+    /// Whether the shared helper for <paramref name="typeFullName"/> declares a state parameter.
+    /// <br/><br/>
+    /// This is the helper's <i>capability</i>, not its default behaviour: a helper that accepts state
+    /// still tracks nothing when it is handed <c>null</c>, exactly like a helper generated without
+    /// the parameter — so widening the capability does not change how an ordinary call clones.
+    /// <br/><br/>
+    /// Capability is derived from the model the helper is generated from, never from the member being
+    /// emitted, so signature and call arguments always agree. It is widened (never narrowed) by
+    /// <see cref="RequiresIdentityOptOutPropagation"/> because an opt-out has to reach helpers nested
+    /// inside the opted-out subgraph. Both inputs are immutable, so the cache is safe and the result
+    /// does not depend on the order in which usages are discovered.
+    /// </summary>
+    public bool HelperAcceptsState(string typeFullName)
+    {
+        if (_helperAcceptsState.TryGetValue(typeFullName, out bool recorded))
+        {
+            return recorded;
+        }
+
+        bool accepts = RequiresIdentityOptOutPropagation || DefaultStateRequirement(typeFullName);
+        _helperAcceptsState[typeFullName] = accepts;
+        return accepts;
+    }
+
+    /// <summary>
+    /// Whether a nested cloner call passes a state argument.
+    /// <br/><br/>
+    /// Registered types are cloned through the context's <c>Clone</c> methods, which always offer both
+    /// a state-taking and a stateless overload, so those calls keep the argument decision they had
+    /// before, widened by the opt-out capability. A generated helper has exactly one signature shared
+    /// by every call site, so its argument count must be precisely <see cref="HelperAcceptsState"/>.
+    /// </summary>
+    public bool HelperTakesState(string helperMethodName, string typeFullName, bool previousDecision)
+    {
+        return HelperAcceptsState(typeFullName) || (helperMethodName == "Clone" && previousDecision);
+    }
+
+    /// <summary>
+    /// State requirement of the type's own cloning, mirroring how <c>GenerateHelpers</c> picks the
+    /// writer: implicit models become implicit clone methods, everything else uses the member model
+    /// registered for the type.
+    /// </summary>
+    private bool DefaultStateRequirement(string typeFullName)
+    {
+        if (_implicitTypeModels.TryGetValue(typeFullName, out TypeModel implicitModel))
+        {
+            return implicitModel.NeedsStateTracking && NeedsStateTracking;
+        }
+
+        if (_typeNameToMemberModel.TryGetValue(typeFullName, out MemberModel member))
+        {
+            return MemberCloneGenerator.MemberNeedsCircularRefTracking(this, member);
+        }
+
+        return false;
+    }
+
     public string GetMethodName(string typeName)
     {
         return _typeNameToMethodName[typeName];
@@ -99,7 +186,59 @@ internal sealed class CloneGeneratorContext
 
     public void RegisterImplicitType(TypeModel model)
     {
+        // Registration only indexes the model: capability was finalized in the constructor, so a
+        // late discovery can never invalidate a helper decision that has already been taken.
         IndexTypeName(_implicitTypeModels, model.FullyQualifiedName, model, model.IsStruct);
+    }
+
+    private static bool ScanForIdentityOptOut(TypeModel model, IEnumerable<TypeModel>? additionalModels)
+    {
+        if (HasOptOutMember(model.Members))
+        {
+            return true;
+        }
+
+        foreach (TypeModel related in model.RelatedTypes)
+        {
+            if (HasOptOutMember(related.Members))
+            {
+                return true;
+            }
+        }
+
+        foreach (TypeModel derived in model.DerivedTypes)
+        {
+            if (HasOptOutMember(derived.Members))
+            {
+                return true;
+            }
+        }
+
+        if (additionalModels != null)
+        {
+            foreach (TypeModel additional in additionalModels)
+            {
+                if (HasOptOutMember(additional.Members))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasOptOutMember(IEnumerable<MemberModel> members)
+    {
+        foreach (MemberModel member in members)
+        {
+            if (member.PreserveIdentity == false)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
     
     public void RegisterExternalMethod(string typeFullName, string methodName)

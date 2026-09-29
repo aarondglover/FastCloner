@@ -13,9 +13,28 @@ internal sealed class CloneCodeGenerator
 
     public CloneCodeGenerator(TypeModel model, EquatableArray<GenericUsage> usages, EquatableArray<ClosedSubtypeUsage> subtypeUsages, BridgeContract bridgeContract)
     {
-        _context = new CloneGeneratorContext(model, bridgeContract);
         _usages = usages;
         _subtypeUsages = subtypeUsages;
+
+        // Generic usages contribute implicit models that only become known here, and they may carry a
+        // member-level identity opt-out. Handing them to the context up front keeps the opt-out
+        // capability complete before the first helper decision, so generated code cannot depend on
+        // which usage happens to be analysed first.
+        _context = new CloneGeneratorContext(model, bridgeContract, additionalModels: GetUsageModels(model, usages));
+    }
+
+    private static IEnumerable<TypeModel> GetUsageModels(TypeModel model, EquatableArray<GenericUsage> usages)
+    {
+        foreach (GenericUsage usage in usages)
+        {
+            if (usage.GenericTypeMetadataName != model.FullyQualifiedName)
+                continue;
+
+            foreach (TypeModel implicitType in usage.ImplicitTypes)
+            {
+                yield return implicitType;
+            }
+        }
     }
 
     public string Generate()
@@ -242,6 +261,26 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine();
     }
 
+    /// <summary>
+    /// Emits the guard that keeps circular reference detection working when a caller passed
+    /// <c>FcGeneratedCloneState.NoReferenceTracking</c>.
+    /// <br/><br/>
+    /// A member marked <c>[FastClonerPreserveIdentity(false)]</c> passes that instance to switch
+    /// identity tracking off for its subgraph, but a type whose subgraph can contain cycles must
+    /// keep tracking: without it a cycle would recurse until the stack overflows. Such a type
+    /// therefore replaces the request with real state — identity preservation stays enabled there,
+    /// because in this design cycle detection and aliasing share the same reference map.
+    /// </summary>
+    private static void WriteNoTrackingStateGuard(StringBuilder sb, bool canHaveCircularReferences)
+    {
+        if (!canHaveCircularReferences)
+            return;
+
+        sb.AppendLine("            // A member opted out of identity preservation with [FastClonerPreserveIdentity(false)],");
+        sb.AppendLine("            // but this type's subgraph can contain cycles, so cycle detection takes precedence.");
+        sb.AppendLine("            if (state != null && !state.TrackReferences) state = null;");
+    }
+
     private void WritePrivateFastDeepCloneMethod(string typeName, string fullTypeName)
     {
         StringBuilder sb = _context.Source;
@@ -291,6 +330,7 @@ internal sealed class CloneCodeGenerator
         else if (_context.NeedsStateTracking)
         {
             _context.NeedsStateClass = true;
+            WriteNoTrackingStateGuard(sb, _context.CanHaveCircularReferences);
             sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
 
             if (!_context.Model.IsStruct)
@@ -444,6 +484,7 @@ internal sealed class CloneCodeGenerator
         if (_context.NeedsStateTracking)
         {
             _context.NeedsStateClass = true;
+            WriteNoTrackingStateGuard(sb, _context.CanHaveCircularReferences);
             sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
             sb.AppendLine("            var known = localState.GetKnownRef(source);");
             sb.AppendLine($"            if (known != null) return ({typeName})known;");
@@ -538,6 +579,7 @@ internal sealed class CloneCodeGenerator
             if (derivedModel.NeedsStateTracking)
             {
                 _context.NeedsStateClass = true;
+                WriteNoTrackingStateGuard(sb, derivedModel.CanHaveCircularReferences);
                 sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
                 sb.AppendLine("            var known = localState.GetKnownRef(source);");
                 sb.AppendLine($"            if (known != null) return ({derivedModel.FullyQualifiedName})known;");
@@ -802,7 +844,7 @@ internal sealed class CloneCodeGenerator
             {
                 MemberModel collectionModel = usage.CollectionModel.Value;
                 string helperName = _context.GetOrCreateHelperMethodName(collectionModel);
-                bool needsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(_context, collectionModel);
+                bool needsState = _context.HelperAcceptsState(collectionModel.TypeFullName);
                 
                 string callArgs = needsState 
                     ? $"(({argType})(object)source, state)" 
@@ -816,7 +858,7 @@ internal sealed class CloneCodeGenerator
                 if (_context.TryGetImplicitTypeModel(argType, out TypeModel implicitModel))
                 {
                      string helperName = _context.GetOrCreateHelperMethodName(argType);
-                     bool needsState = implicitModel.NeedsStateTracking && _context.NeedsStateTracking;
+                     bool needsState = _context.HelperAcceptsState(argType);
                      string callArgs = needsState 
                         ? $"(({argType})(object)source, state)" 
                         : $"(({argType})(object)source)";

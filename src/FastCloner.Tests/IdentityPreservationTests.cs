@@ -425,4 +425,699 @@ public class IdentityPreservationTests
     }
     
     #endregion
+
+    #region Test 10: Member-level PreserveIdentity overrides child type-level attribute
+
+    /// <summary>
+    /// Shared leaf used to observe whether aliasing inside a subgraph survived cloning.
+    /// </summary>
+    [FastClonerClonable]
+    public class PrecedenceSharedLeaf
+    {
+        public int Value { get; set; }
+    }
+
+    /// <summary>
+    /// Child whose own type-level attribute turns identity preservation on.
+    /// Cloning this type directly should keep the Left/Right aliasing.
+    /// </summary>
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class PrecedenceChildWithIdentity
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Child with no type-level attribute (library default: identity preserved only
+    /// when a member override asks for it or the graph needs cycle tracking).
+    /// </summary>
+    [FastClonerClonable]
+    public class PrecedenceChildWithoutIdentity
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class MemberFalseOverChildTypeTrueRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceChildWithIdentity Child { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class MemberTrueOverChildTypeDefaultRoot
+    {
+        [FastClonerPreserveIdentity(true)]
+        public PrecedenceChildWithoutIdentity Child { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class NoMemberOverrideChildTypeTrueRoot
+    {
+        public PrecedenceChildWithIdentity Child { get; set; } = new();
+    }
+
+    [Test]
+    public async Task MemberFalse_OverridesChildTypeTrue_DoesNotPreserveIdentity()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 7 };
+        MemberFalseOverChildTypeTrueRoot original = new MemberFalseOverChildTypeTrueRoot
+        {
+            Child = new PrecedenceChildWithIdentity { Left = shared, Right = shared }
+        };
+
+        await Assert.That(original.Child.Left).IsSameReferenceAs(original.Child.Right);
+
+        MemberFalseOverChildTypeTrueRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child).IsNotSameReferenceAs(original.Child);
+        await Assert.That(clone.Child.Left).IsNotSameReferenceAs(original.Child.Left);
+        await Assert.That(clone.Child.Left.Value).IsEqualTo(7);
+        await Assert.That(clone.Child.Right.Value).IsEqualTo(7);
+
+        // Member-level [FastClonerPreserveIdentity(false)] must win over the child's
+        // type-level [FastClonerPreserveIdentity(true)] for this member's subgraph.
+        await Assert.That(clone.Child.Left).IsNotSameReferenceAs(clone.Child.Right).Because(
+            "member-level PreserveIdentity(false) must suppress identity preservation for the member's subgraph");
+    }
+
+    [Test]
+    public async Task MemberFalse_OverridesChildTypeTrue_ChildClonedDirectlyStillPreservesIdentity()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 9 };
+        PrecedenceChildWithIdentity original = new PrecedenceChildWithIdentity { Left = shared, Right = shared };
+
+        PrecedenceChildWithIdentity clone = original.FastDeepClone();
+
+        // Type-level [FastClonerPreserveIdentity(true)] semantics for a directly cloned
+        // root must be unaffected by the member-level override in another type.
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right).Because(
+            "type-level identity preservation for the directly cloned type must be preserved");
+    }
+
+    [Test]
+    public async Task MemberTrue_OverridesChildTypeDefault_PreservesIdentity()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 11 };
+        MemberTrueOverChildTypeDefaultRoot original = new MemberTrueOverChildTypeDefaultRoot
+        {
+            Child = new PrecedenceChildWithoutIdentity { Left = shared, Right = shared }
+        };
+
+        await Assert.That(original.Child.Left).IsSameReferenceAs(original.Child.Right);
+
+        MemberTrueOverChildTypeDefaultRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child).IsNotSameReferenceAs(original.Child);
+        await Assert.That(clone.Child.Left.Value).IsEqualTo(11);
+        await Assert.That(clone.Child.Left).IsSameReferenceAs(clone.Child.Right).Because(
+            "member-level PreserveIdentity(true) must enable identity preservation for the member's subgraph");
+    }
+
+    [Test]
+    public async Task NoMemberOverride_ChildTypeTrue_PreservesIdentity()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 13 };
+        NoMemberOverrideChildTypeTrueRoot original = new NoMemberOverrideChildTypeTrueRoot
+        {
+            Child = new PrecedenceChildWithIdentity { Left = shared, Right = shared }
+        };
+
+        await Assert.That(original.Child.Left).IsSameReferenceAs(original.Child.Right);
+
+        NoMemberOverrideChildTypeTrueRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child).IsNotSameReferenceAs(original.Child);
+        await Assert.That(clone.Child.Left).IsNotSameReferenceAs(original.Child.Left);
+        await Assert.That(clone.Child.Left.Value).IsEqualTo(13);
+        await Assert.That(clone.Child.Left).IsSameReferenceAs(clone.Child.Right).Because(
+            "without a member override the child type's own PreserveIdentity(true) must apply");
+    }
+
+    #endregion
+
+    #region Test 11: member-level opt-out interactions (ambient state, nesting, cycles, non-public)
+
+    /// <summary>
+    /// Root that itself tracks identity: the opt-out member must not inherit the parent's
+    /// tracking state, while the parent's own members keep preserving identity.
+    /// </summary>
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class IdentityRootWithOptOutMember
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceChildWithIdentity Child { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class PrecedenceNestedHolder
+    {
+        public PrecedenceChildWithIdentity Inner { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class MemberFalseOverNestedIdentityRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceNestedHolder Child { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class PrecedenceCyclicChild
+    {
+        public int Value { get; set; }
+        public PrecedenceCyclicChild? Next { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class MemberFalseOverCyclicChildRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceCyclicChild Child { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class MemberFalseOverPrivateClonableFieldRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        private PrecedenceChildWithIdentity _child = new();
+
+        // Accessors are methods rather than a property: a public property over the same storage
+        // would be cloned as a second member and overwrite the field clone under test.
+        public void SetChild(PrecedenceChildWithIdentity child) => _child = child;
+
+        public PrecedenceChildWithIdentity GetChild() => _child;
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class IdentityRootWithOptOutCollectionMember
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+
+        [FastClonerPreserveIdentity(false)]
+        public List<PrecedenceChildWithIdentity> Items { get; set; } = [];
+    }
+
+    [Test]
+    public async Task MemberFalse_OverridesChildTypeTrue_EvenWhenParentTracksIdentity()
+    {
+        PrecedenceSharedLeaf sharedLeaf = new PrecedenceSharedLeaf { Value = 5 };
+        PrecedenceSharedLeaf childLeaf = new PrecedenceSharedLeaf { Value = 6 };
+
+        IdentityRootWithOptOutMember original = new IdentityRootWithOptOutMember
+        {
+            Left = sharedLeaf,
+            Right = sharedLeaf,
+            Child = new PrecedenceChildWithIdentity { Left = childLeaf, Right = childLeaf }
+        };
+
+        IdentityRootWithOptOutMember clone = original.FastDeepClone();
+
+        // The parent's own members still share the parent's tracking state.
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right);
+        await Assert.That(clone.Left.Value).IsEqualTo(5);
+
+        // The opted-out member does not get the parent's state forwarded into its subgraph.
+        await Assert.That(clone.Child.Left).IsNotSameReferenceAs(clone.Child.Right).Because(
+            "member-level PreserveIdentity(false) must not inherit the parent's identity-tracking state");
+        await Assert.That(clone.Child.Left.Value).IsEqualTo(6);
+    }
+
+    [Test]
+    public async Task MemberFalse_PropagatesThroughNestedIdentityTrackingTypes()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 8 };
+        MemberFalseOverNestedIdentityRoot original = new MemberFalseOverNestedIdentityRoot
+        {
+            Child = new PrecedenceNestedHolder
+            {
+                Inner = new PrecedenceChildWithIdentity { Left = shared, Right = shared }
+            }
+        };
+
+        MemberFalseOverNestedIdentityRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child.Inner.Left.Value).IsEqualTo(8);
+        await Assert.That(clone.Child.Inner.Left).IsNotSameReferenceAs(clone.Child.Inner.Right).Because(
+            "the opt-out must propagate into nested types that would otherwise track identity");
+    }
+
+    [Test]
+    public async Task MemberFalse_OverChildWithCycles_StillDetectsCycles()
+    {
+        PrecedenceCyclicChild child = new PrecedenceCyclicChild { Value = 1 };
+        child.Next = child; // self-cycle
+
+        MemberFalseOverCyclicChildRoot original = new MemberFalseOverCyclicChildRoot { Child = child };
+
+        MemberFalseOverCyclicChildRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child).IsNotSameReferenceAs(original.Child);
+        await Assert.That(clone.Child.Value).IsEqualTo(1);
+
+        // Cycle detection must win over the opt-out: without it this clone would recurse forever.
+        await Assert.That(clone.Child.Next).IsSameReferenceAs(clone.Child).Because(
+            "circular references must still be detected when a member opts out of identity preservation");
+    }
+
+    [Test]
+    public async Task MemberFalse_OnPrivateClonableField_IsHonored()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 17 };
+        MemberFalseOverPrivateClonableFieldRoot original = new MemberFalseOverPrivateClonableFieldRoot();
+        original.SetChild(new PrecedenceChildWithIdentity { Left = shared, Right = shared });
+
+        MemberFalseOverPrivateClonableFieldRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.GetChild()).IsNotSameReferenceAs(original.GetChild());
+        await Assert.That(clone.GetChild().Left.Value).IsEqualTo(17);
+        await Assert.That(clone.GetChild().Left).IsNotSameReferenceAs(clone.GetChild().Right).Because(
+            "a member-level opt-out must also apply to non-public members");
+    }
+
+    [Test]
+    public async Task MemberFalse_OnCollectionMember_DoesNotPreserveIdentityAcrossElements()
+    {
+        PrecedenceSharedLeaf sharedLeaf = new PrecedenceSharedLeaf { Value = 3 };
+        PrecedenceChildWithIdentity sharedElement = new PrecedenceChildWithIdentity
+        {
+            Left = sharedLeaf,
+            Right = sharedLeaf
+        };
+
+        IdentityRootWithOptOutCollectionMember original = new IdentityRootWithOptOutCollectionMember
+        {
+            Left = sharedLeaf,
+            Right = sharedLeaf,
+            Items = [sharedElement, sharedElement]
+        };
+
+        IdentityRootWithOptOutCollectionMember clone = original.FastDeepClone();
+
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right);
+
+        // The opted-out collection member does not share the parent's tracking state, so the two
+        // occurrences of the same element clone independently...
+        await Assert.That(clone.Items[0]).IsNotSameReferenceAs(clone.Items[1]);
+
+        // ...and the opt-out reaches the element cloners, suppressing aliasing inside each element
+        // even though the element type's own default is to preserve identity.
+        await Assert.That(clone.Items[0].Left).IsNotSameReferenceAs(clone.Items[0].Right).Because(
+            "a member-level opt-out must reach the collection's element cloners");
+        await Assert.That(clone.Items[0].Left.Value).IsEqualTo(3);
+        await Assert.That(clone.Items[1].Left.Value).IsEqualTo(3);
+    }
+
+    #endregion
+
+    #region Test 12: member-level override on an implicitly cloned (unannotated) POCO
+
+    /// <summary>
+    /// Plain POCO without <c>[FastClonerClonable]</c>: cloned implicitly by the generator.
+    /// </summary>
+    public class PrecedenceImplicitHolder
+    {
+        public PrecedenceChildWithIdentity Inner { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class IdentityRootWithOptOutImplicitMember
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceImplicitHolder Holder { get; set; } = new();
+    }
+
+    [Test]
+    public async Task MemberFalse_OnImplicitPocoMember_DoesNotPreserveIdentityBelow()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 31 };
+        IdentityRootWithOptOutImplicitMember original = new IdentityRootWithOptOutImplicitMember
+        {
+            Left = shared,
+            Right = shared,
+            Holder = new PrecedenceImplicitHolder
+            {
+                Inner = new PrecedenceChildWithIdentity { Left = shared, Right = shared }
+            }
+        };
+
+        IdentityRootWithOptOutImplicitMember clone = original.FastDeepClone();
+
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right);
+        await Assert.That(clone.Holder.Inner.Left.Value).IsEqualTo(31);
+        await Assert.That(clone.Holder.Inner.Left).IsNotSameReferenceAs(clone.Holder.Inner.Right).Because(
+            "a member-level opt-out must reach the implicit POCO's nested cloners");
+    }
+
+    #endregion
+
+    #region Test 13: member-level overrides on arrays, dictionaries and safe-element collections
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class IdentityRootWithOptOutArrayMember
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceChildWithIdentity[] Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class IdentityRootWithOptOutDictionaryMember
+    {
+        public PrecedenceSharedLeaf Left { get; set; } = new();
+        public PrecedenceSharedLeaf Right { get; set; } = new();
+
+        [FastClonerPreserveIdentity(false)]
+        public Dictionary<string, PrecedenceChildWithIdentity> Items { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Mirror case: an explicit opt-in on a collection of safe elements. The elements cannot be
+    /// shared, so the opt-in is unobservable — but it used to desynchronise the helper signature
+    /// from the call arguments and break the build.
+    /// </summary>
+    [FastClonerClonable]
+    public class RootWithOptInSafeElementCollection
+    {
+        [FastClonerPreserveIdentity]
+        public List<string> Labels { get; set; } = [];
+    }
+
+    [Test]
+    public async Task MemberFalse_OnArrayMember_DoesNotPreserveIdentityInElements()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 21 };
+        IdentityRootWithOptOutArrayMember original = new IdentityRootWithOptOutArrayMember
+        {
+            Left = shared,
+            Right = shared,
+            Items = [new PrecedenceChildWithIdentity { Left = shared, Right = shared }]
+        };
+
+        IdentityRootWithOptOutArrayMember clone = original.FastDeepClone();
+
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right);
+        await Assert.That(clone.Items[0].Left.Value).IsEqualTo(21);
+        await Assert.That(clone.Items[0].Left).IsNotSameReferenceAs(clone.Items[0].Right).Because(
+            "a member-level opt-out must reach array element cloners");
+    }
+
+    [Test]
+    public async Task MemberFalse_OnDictionaryMember_DoesNotPreserveIdentityInValues()
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = 22 };
+        IdentityRootWithOptOutDictionaryMember original = new IdentityRootWithOptOutDictionaryMember
+        {
+            Left = shared,
+            Right = shared,
+            Items = { ["a"] = new PrecedenceChildWithIdentity { Left = shared, Right = shared } }
+        };
+
+        IdentityRootWithOptOutDictionaryMember clone = original.FastDeepClone();
+
+        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right);
+        await Assert.That(clone.Items["a"].Left.Value).IsEqualTo(22);
+        await Assert.That(clone.Items["a"].Left).IsNotSameReferenceAs(clone.Items["a"].Right).Because(
+            "a member-level opt-out must reach dictionary value cloners");
+    }
+
+    [Test]
+    public async Task MemberTrue_OnSafeElementCollection_ClonesSuccessfully()
+    {
+        RootWithOptInSafeElementCollection original = new RootWithOptInSafeElementCollection
+        {
+            Labels = ["a", "b", "a"]
+        };
+
+        RootWithOptInSafeElementCollection clone = original.FastDeepClone();
+
+        await Assert.That(clone.Labels).IsEquivalentTo(new[] { "a", "b", "a" });
+        await Assert.That(clone.Labels).IsNotSameReferenceAs(original.Labels);
+    }
+
+    #endregion
+
+    #region Test 14: member-level opt-out with a root that needs no state of its own
+
+    // The roots below carry no [FastClonerPreserveIdentity] and have no cycles, so the root itself
+    // generates no tracking state and every helper it emits is stateless for its own sake. A helper
+    // must still be able to receive the member-level opt-out ("capability" is not "default
+    // behaviour").
+
+    [FastClonerClonable]
+    public class CollectionOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public List<PrecedenceChildWithIdentity> Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    public class ArrayOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceChildWithIdentity[] Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    public class DictionaryOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public Dictionary<string, PrecedenceChildWithIdentity> Items { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class ImplicitOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceImplicitHolder Holder { get; set; } = new();
+    }
+
+    [FastClonerClonable]
+    public class NestedCollectionOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public List<List<PrecedenceChildWithIdentity>> Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    public class GetterOnlyCollectionOptOutRootDefaultOff
+    {
+        public GetterOnlyCollectionOptOutRootDefaultOff()
+        {
+            Items = [];
+        }
+
+        public GetterOnlyCollectionOptOutRootDefaultOff(List<PrecedenceChildWithIdentity> items)
+        {
+            Items = items;
+        }
+
+        [FastClonerPreserveIdentity(false)]
+        public List<PrecedenceChildWithIdentity> Items { get; }
+    }
+
+    [FastClonerClonable]
+    public class ClonableOptOutRootDefaultOff
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PrecedenceChildWithIdentity Child { get; set; } = new();
+    }
+
+    /// <summary>Builds a <see cref="PrecedenceChildWithIdentity"/> whose members alias one leaf.</summary>
+    private static PrecedenceChildWithIdentity AliasedChild(int value)
+    {
+        PrecedenceSharedLeaf shared = new PrecedenceSharedLeaf { Value = value };
+        return new PrecedenceChildWithIdentity { Left = shared, Right = shared };
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_ClonableMemberOptOut_DoesNotPreserveIdentity()
+    {
+        ClonableOptOutRootDefaultOff original = new ClonableOptOutRootDefaultOff { Child = AliasedChild(41) };
+
+        ClonableOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Child.Left.Value).IsEqualTo(41);
+        await Assert.That(clone.Child.Left).IsNotSameReferenceAs(clone.Child.Right).Because(
+            "the child's type-level default must not win over the member-level opt-out");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_CollectionMemberOptOut_DoesNotPreserveIdentityInElements()
+    {
+        CollectionOptOutRootDefaultOff original = new CollectionOptOutRootDefaultOff { Items = [AliasedChild(42)] };
+
+        CollectionOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items.Count).IsEqualTo(1);
+        await Assert.That(clone.Items[0].Left.Value).IsEqualTo(42);
+        await Assert.That(clone.Items[0].Left).IsNotSameReferenceAs(clone.Items[0].Right).Because(
+            "a stateless default must not stop the opt-out from reaching the element cloner");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_ArrayMemberOptOut_DoesNotPreserveIdentityInElements()
+    {
+        ArrayOptOutRootDefaultOff original = new ArrayOptOutRootDefaultOff { Items = [AliasedChild(43)] };
+
+        ArrayOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items[0].Left.Value).IsEqualTo(43);
+        await Assert.That(clone.Items[0].Left).IsNotSameReferenceAs(clone.Items[0].Right).Because(
+            "a stateless default must not stop the opt-out from reaching the array element cloner");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_DictionaryMemberOptOut_DoesNotPreserveIdentityInValues()
+    {
+        DictionaryOptOutRootDefaultOff original = new DictionaryOptOutRootDefaultOff
+        {
+            Items = { ["a"] = AliasedChild(44) }
+        };
+
+        DictionaryOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items["a"].Left.Value).IsEqualTo(44);
+        await Assert.That(clone.Items["a"].Left).IsNotSameReferenceAs(clone.Items["a"].Right).Because(
+            "a stateless default must not stop the opt-out from reaching the dictionary value cloner");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_ImplicitPocoMemberOptOut_DoesNotPreserveIdentityBelow()
+    {
+        ImplicitOptOutRootDefaultOff original = new ImplicitOptOutRootDefaultOff
+        {
+            Holder = new PrecedenceImplicitHolder { Inner = AliasedChild(45) }
+        };
+
+        ImplicitOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Holder.Inner.Left.Value).IsEqualTo(45);
+        await Assert.That(clone.Holder.Inner.Left).IsNotSameReferenceAs(clone.Holder.Inner.Right).Because(
+            "a stateless default must not stop the opt-out from reaching the implicit POCO's cloners");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_NestedCollectionMemberOptOut_DoesNotPreserveIdentityInElements()
+    {
+        NestedCollectionOptOutRootDefaultOff original = new NestedCollectionOptOutRootDefaultOff
+        {
+            Items = [[AliasedChild(46)]]
+        };
+
+        NestedCollectionOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items[0][0].Left.Value).IsEqualTo(46);
+        await Assert.That(clone.Items[0][0].Left).IsNotSameReferenceAs(clone.Items[0][0].Right).Because(
+            "the opt-out must propagate through nested collection helpers");
+    }
+
+    [Test]
+    public async Task DefaultOffRoot_GetterOnlyCollectionMemberOptOut_DoesNotPreserveIdentityInElements()
+    {
+        GetterOnlyCollectionOptOutRootDefaultOff original =
+            new GetterOnlyCollectionOptOutRootDefaultOff([AliasedChild(47)]);
+
+        GetterOnlyCollectionOptOutRootDefaultOff clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items[0].Left.Value).IsEqualTo(47);
+        await Assert.That(clone.Items[0].Left).IsNotSameReferenceAs(clone.Items[0].Right).Because(
+            "a stateless default must not stop the opt-out from reaching a getter-only collection's elements");
+    }
+
+    #endregion
+
+    #region Test 15: capability must not depend on generic usage discovery order
+
+    // A plain POCO (no attribute) with an opted-out member. It only becomes known to the generator
+    // while generic usages are being analysed, i.e. after the root's own members were emitted.
+    public class GenericUsageOptOutPoco
+    {
+        [FastClonerPreserveIdentity(false)]
+        public List<PrecedenceChildWithIdentity> Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    public class GenericOptOutOrderFirst<T>
+    {
+        public T Value { get; set; } = default!;
+    }
+
+    [FastClonerClonable]
+    public class GenericOptOutOrderLast<T>
+    {
+        public T Value { get; set; } = default!;
+    }
+
+    /// <summary>
+    /// Usage ordering A: the state-free usage (which decides the capability of the shared
+    /// <c>List&lt;PrecedenceChildWithIdentity&gt;</c> helper) comes first, the usage that introduces
+    /// the opted-out POCO second.
+    /// </summary>
+    private static void TouchUsagesStateFreeFirst()
+    {
+        _ = new GenericOptOutOrderFirst<List<PrecedenceChildWithIdentity>>();
+        _ = new GenericOptOutOrderFirst<GenericUsageOptOutPoco>();
+    }
+
+    /// <summary>Usage ordering B: the opted-out POCO is discovered first.</summary>
+    private static void TouchUsagesOptOutFirst()
+    {
+        _ = new GenericOptOutOrderLast<GenericUsageOptOutPoco>();
+        _ = new GenericOptOutOrderLast<List<PrecedenceChildWithIdentity>>();
+    }
+
+    [Test]
+    public async Task GenericUsageOrder_StateFreeUsageFirst_StillHonoursMemberOptOut()
+    {
+        TouchUsagesStateFreeFirst();
+
+        GenericOptOutOrderFirst<GenericUsageOptOutPoco> original = new GenericOptOutOrderFirst<GenericUsageOptOutPoco>
+        {
+            Value = new GenericUsageOptOutPoco { Items = [AliasedChild(51)] }
+        };
+
+        GenericOptOutOrderFirst<GenericUsageOptOutPoco> clone = original.FastDeepClone();
+
+        await Assert.That(clone.Value.Items[0].Left.Value).IsEqualTo(51);
+        await Assert.That(clone.Value.Items[0].Left).IsNotSameReferenceAs(clone.Value.Items[0].Right).Because(
+            "capability must not depend on which generic usage happened to be analysed first");
+    }
+
+    [Test]
+    public async Task GenericUsageOrder_OptOutUsageFirst_StillHonoursMemberOptOut()
+    {
+        TouchUsagesOptOutFirst();
+
+        GenericOptOutOrderLast<GenericUsageOptOutPoco> original = new GenericOptOutOrderLast<GenericUsageOptOutPoco>
+        {
+            Value = new GenericUsageOptOutPoco { Items = [AliasedChild(52)] }
+        };
+
+        GenericOptOutOrderLast<GenericUsageOptOutPoco> clone = original.FastDeepClone();
+
+        await Assert.That(clone.Value.Items[0].Left.Value).IsEqualTo(52);
+        await Assert.That(clone.Value.Items[0].Left).IsNotSameReferenceAs(clone.Value.Items[0].Right).Because(
+            "the reversed usage order must generate the same semantics");
+    }
+
+    #endregion
 }
