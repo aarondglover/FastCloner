@@ -88,6 +88,12 @@ internal sealed class CloneCodeGenerator
 
     public bool IdentityPreservationRequired => _context.IdentityPreservationRequired;
 
+    /// <summary>
+    /// True when a preserving discovery surface names this root directly (as opposed to being
+    /// required only because another root's graph reaches it).
+    /// </summary>
+    public bool ExplicitIdentityOperationRequested => _context.ExposesIdentityOperation;
+
     private void PreAnalyzeHelperUsages()
     {
         AnalyzeMembers(_context.Model.Members);

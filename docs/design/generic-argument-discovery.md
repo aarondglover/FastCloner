@@ -155,12 +155,15 @@ value.FastDeepClone(FastCloneOptions.PreserveIdentity);  // A' ──► B' ◄�
 ```
 
 The explicit request is the strongest identity requirement for that invocation: member and type level
-`PreserveIdentity(false)` are defaults for the ordinary call and do not weaken it.
+`PreserveIdentity(false)` are defaults for the ordinary call and do not weaken it. The operation-level overload
+belongs to the surface declaration, so it is offered on the roots a `PreserveIdentity = true` surface names
+directly — an existing `[FastClonerPreserveIdentity]` configuration elsewhere keeps its own surface unchanged.
 
-See the implementation notes below for the capability model, for the boundary the generator repairs and the
-boundary it reports instead of advertising (a preserving operation is only offered where the generated graph can
-actually carry it), and for the pre-existing member-level negative-override limitation against a child type whose
-own default is preserving, which stays a separate issue.
+See the implementation notes below for the four separate concepts (default behaviour, internal state capability,
+hard requirement and public operation exposure), for the boundary the generator repairs and the boundary it reports
+instead of advertising (a preserving operation is only offered where the generated graph can actually carry it),
+and for the pre-existing member-level negative-override limitation against a child type whose own default is
+preserving, which stays a separate issue.
 
 ## Proposed attribute surface
 
@@ -234,9 +237,13 @@ Tests should cover at least:
 - the generated-to-generated state transitions (non-public members, `Cloner<T>` for an included clonable argument,
   a collection of the root's own type parameter) keeping one tracking state;
 - a requirement that cannot be served being reported (`FCG013`) with the operation-level entry point withheld, and
-  a graph that can be served exposing it with no runtime-cloner escape path;
-- the exposure distinction: a cycle-only root and a transitively capable type do not gain the overload, a directly
-  named or identity-configured root does, and the transitive type still honors the parent's preserving state.
+  a graph that can be served exposing it with no runtime-cloner escape path — including a boundary two hops down,
+  where the message describes the offending type as part of a required graph rather than as an operation root;
+- the exposure distinction: a cycle-only root, a transitively capable or required type, and an existing
+  `[FastClonerPreserveIdentity]` root all keep their surface, only a directly named root gains the overload, and the
+  transitive type still honors the parent's preserving state;
+- existing identity configuration still driving the ordinary default, for both `[FastClonerPreserveIdentity]` and
+  `[FastClonerPreserveIdentity(false)]`, without interfering with an explicitly requested discovery operation.
 
 ## Implementation notes
 
@@ -313,8 +320,8 @@ The capability is requested by:
 2. any `[FastClonerPreserveIdentity]` on the type or one of its members, and
 3. a `PreserveIdentity = true` discovery surface — directly, or because a required parent's graph reaches this type.
 
-Note that (1) and (3)-through-a-parent are capability only; see the next section for what additionally decides the
-public API surface.
+Note that (1), (2) and (3)-through-a-parent are capability only; see the next section for what additionally decides
+the public API surface.
 
 ### Four separate concepts
 
@@ -325,14 +332,24 @@ Keeping these apart is what stops the feature from leaking public API surface:
 | default behaviour | `TypeModel.NeedsStateTracking`, `PreserveIdentity` | what `FastDeepClone()` does; untouched by everything below |
 | internal state capability | `TypeModel.SupportsStateTracking` | this generated type/helper can accept and correctly propagate an `FcGeneratedCloneState` supplied by a containing preserving operation |
 | hard preserving requirement | `TypeModel.IdentityPreservationRequired` | a `PreserveIdentity = true` surface needs a graph-wide guarantee from this type, directly or because a required parent's graph reaches it |
-| public operation exposure | `TypeModel.ExplicitIdentityOperationRequested` + local `[FastClonerPreserveIdentity]`, exposed as `CloneGeneratorContext.ExposesIdentityOperation` | this root itself has a reason to offer `FastDeepClone(FastCloneOptions)` |
+| public operation exposure | `TypeModel.ExplicitIdentityOperationRequested`, exposed as `CloneGeneratorContext.ExposesIdentityOperation` | a `PreserveIdentity = true` surface named this type *directly*, so it is the root that offers `FastDeepClone(FastCloneOptions)` |
 
 Capability legitimately arises for a type that only tracks state for cycles, or because another root's graph reaches
 it. Requirement legitimately propagates through a parent's graph, because the parent's guarantee would otherwise be
 false. Neither is a reason for a new public API on that type, which is why exposure is derived from the
 *originating* requirement only. `IdentityCapabilityRequirements.Expand` therefore returns three separate sets —
-capability, required, and direct — and only the direct set (plus local identity configuration) drives
-`ExposesIdentityOperation`.
+capability, required, and direct — and only the direct set drives `ExposesIdentityOperation`.
+
+Exposure is deliberately narrower than identity configuration too: an existing `[FastClonerPreserveIdentity]` on a
+type or a member predates this feature and keeps driving the ordinary `FastDeepClone()` default exactly as it did.
+Configuring identity is not a reason to add the new overload across unrelated existing consumers. A type gains the
+overload only if a `PreserveIdentity = true` surface names it directly — and that holds even when the type itself
+says `[FastClonerPreserveIdentity(false)]`, because the discovery surface asked for the capability explicitly:
+
+```csharp
+form.FastDeepClone();                                  // the type's own [false] default is unchanged
+form.FastDeepClone(FastCloneOptions.PreserveIdentity); // the discovery requirement is served
+```
 
 ### Operation-level override
 
@@ -345,11 +362,13 @@ The generated overload delegates to the existing entry point when the option is 
 request the strongest requirement for that invocation: topology is preserved whether the type's default preserves or
 not.
 
-The overload is emitted **only when the root exposes the operation *and* the generated graph proves it can carry one
-tracking state across everything it deep clones**. Three things can withhold it:
+The overload is emitted **only when the root is directly named by a <c>PreserveIdentity = true</c> surface *and*
+the generated graph proves it can carry one tracking state across everything it deep clones**. Three things can
+withhold it:
 
-- the root has no reason of its own to expose the API (cycles only, or a transitively capable helper) — it keeps
-  accepting a parent's state, it just grows no new public surface;
+- the root has no direct discovery requirement — a cycle-tracking root, a transitively required or transitively
+  capable helper, or an existing `[FastClonerPreserveIdentity]` type. They all keep accepting a parent's state
+  through `InternalFastDeepClone`; they just grow no new public surface;
 - a part of the graph necessarily delegates to the runtime cloner (see *Generated/runtime boundary* below); or
 - the root is not state capable at all.
 
@@ -429,14 +448,15 @@ sharing the supplied state. The modelling is gated so ordinary roots keep their 
 
 Capability is a union, never a contest. `Surface A → Form (PreserveIdentity required)` and
 `Surface B → Form (no requirement)` produce one `Form` root whose default behavior is whatever `Form`'s own
-configuration says; the requirement merely ensures the generated graph can serve a preserving operation. Roots
-are deduplicated by fully qualified name and the capability flag is OR-ed.
+configuration says; the requirement merely ensures the generated graph can serve a preserving operation, and
+surface A named `Form` directly so it is also the root that exposes it. Roots are deduplicated by fully qualified
+name and each of the three sets (capability, required, direct) is OR-ed.
 
 If the discovered type is already `[FastClonerClonable]`, discovery does not skip the requirement and does not
 emit a second root: the requirement is carried as an FQN-keyed requirement and OR-ed into the model produced by
 the clonable pipeline before code generation. That is also how exposure reaches an already-clonable type: the
-surface *names* it, so it is in the direct set and gains the overload, while the types its graph reaches only gain
-the capability (and the requirement, so a broken guarantee is still reported).
+surface *names* it, so it is in the direct set and gains the overload once, while the types its graph reaches only
+gain the capability (and the requirement, so a broken guarantee is still reported).
 
 Capability, requirement and exposure are all unions, never contests — a type reached by several surfaces gets each
 of them once.
@@ -484,11 +504,16 @@ which gives two guarantees:
 
   | ID | Severity | Raised when |
   |----|----------|-------------|
-  | `FCG013` | Error | a `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]` requirement cannot be supplied for a type — directly or as part of a required graph — because its graph necessarily delegates to the runtime cloner |
+  | `FCG013` | Error | a `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]` requirement cannot be supplied for a type — directly, or as an offending part of a required graph — because its graph necessarily delegates to the runtime cloner |
+
+  The message distinguishes the two shapes. A **directly** required root was asked to expose the operation, so it
+  says so. A **transitively** required type deliberately does not expose the operation itself, so it is described as
+  an offending part of a graph whose root requires identity preservation. There is no need for the parent to repeat
+  the error.
 
   There is deliberately **no diagnostic** for a type that merely configures `[FastClonerPreserveIdentity]`: that
-  predates the new operation-level API, its `FastDeepClone()` behavior is unchanged, and the overload is simply not
-  added. Warning there would be build noise for consumers who never requested the API.
+  predates this feature, its `FastDeepClone()` behavior is unchanged, and the overload is not part of its surface at
+  all. Warning there would be build noise for consumers who never requested the API.
 
   Roots that never requested identity preservation (including roots that only track state for circular references)
   get neither diagnostic nor change, and keep their existing generated output.

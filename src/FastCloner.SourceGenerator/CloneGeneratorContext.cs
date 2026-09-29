@@ -45,23 +45,24 @@ internal sealed class CloneGeneratorContext
     public bool IdentityPreservationRequired => Model.IdentityPreservationRequired;
 
     /// <summary>
-    /// True when the type asked for identity preservation itself, so it exposes the operation-level
-    /// entry point even without a discovery requirement.
-    /// </summary>
-    public bool ConfiguresIdentity => Model.PreserveIdentity.HasValue ||
-                                      Model.Members.Any(static member => member.PreserveIdentity.HasValue);
-
-    /// <summary>
-    /// Whether this root offers the public <c>FastDeepClone(FastCloneOptions)</c> entry point. This is
-    /// deliberately distinct from <see cref="StateCapable"/> (the internal capability to honor a
-    /// supplied state) and from <see cref="IdentityPreservationRequired"/> (which also covers
-    /// requirements propagated through a parent's graph):
+    /// Whether this root offers the public <c>FastDeepClone(FastCloneOptions)</c> entry point.
     /// <br/><br/>
-    /// - a cycle-tracking root is state capable but never asked for the operation;
-    /// - a type that only became capable because another preserving root calls its generated cloner
-    ///   must accept and honor that state, but has no reason to grow a new public API.
+    /// Public exposure comes only from a <em>direct</em> discovery requirement: a surface declaring
+    /// <c>PreserveIdentity = true</c> that names this type itself. It is deliberately narrower than
+    /// the other two concepts in play:
+    /// <br/><br/>
+    /// - <see cref="StateCapable"/> is the internal capability to honor a supplied state. A
+    ///   cycle-tracking root has it, and so does a type that only became capable because another
+    ///   preserving root's graph reaches it; neither should grow a new public API for it.
+    /// - <see cref="IdentityPreservationRequired"/> also covers requirements propagated through a
+    ///   parent's graph. A transitively required type must honor the parent's state and must be
+    ///   reported when it cannot, but it does not expose the operation itself.
+    /// - An existing <c>[FastClonerPreserveIdentity]</c> configuration predates this API and keeps
+    ///   driving the ordinary <c>FastDeepClone()</c> default exactly as before. On its own it is not
+    ///   a reason to add a new public overload across existing consumers; the type gains one only if
+    ///   it is also named directly by a preserving discovery surface.
     /// </summary>
-    public bool ExposesIdentityOperation => Model.ExplicitIdentityOperationRequested || ConfiguresIdentity;
+    public bool ExposesIdentityOperation => Model.ExplicitIdentityOperationRequested;
 
     /// <summary>
     /// Reasons why this generated graph cannot carry one tracking state across everything it deep
