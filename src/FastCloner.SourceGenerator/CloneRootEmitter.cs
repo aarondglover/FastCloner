@@ -83,23 +83,31 @@ internal static class CloneRootEmitter
             // graph that necessarily delegates to the runtime cloner. That is correct rather than
             // silent: a caller cannot obtain a clone that would ignore the requirement.
             //
-            // A hard requirement has to be reported instead of being downgraded to best effort. A type
-            // that merely configures [FastClonerPreserveIdentity] is deliberately silent: its
-            // FastDeepClone() behavior is unchanged, the new overload simply is not added, and warning
-            // about an API the consumer never asked for would be noise.
+            // A hard requirement has to be reported instead of being downgraded to best effort. The
+            // wording distinguishes the two shapes: a directly required root was asked to serve (and
+            // expose) the operation; a transitively required type is an offending part of a graph
+            // whose root required it and deliberately does not expose the operation itself.
             if (generator.IdentityPreservationRequired && generator.RuntimeBoundaryReasons.Count > 0)
             {
                 string reasons = string.Join("; ", generator.RuntimeBoundaryReasons);
+
+                string message = generator.ExplicitIdentityOperationRequested
+                    ? "'[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]' directly requires type '{0}' to expose " +
+                      "FastDeepClone(FastCloneOptions.PreserveIdentity), but part of its graph is necessarily cloned by the runtime " +
+                      "cloner, which runs its own tracking state: {1}. " +
+                      "The operation-level overload is therefore not generated for '{0}'. " +
+                      "Make the listed members use a type the generator can clone (a concrete clonable or implicitly clonable type)."
+                    : "Type '{0}' is part of a graph whose root requires identity preservation, but this part of the graph cannot " +
+                      "carry the shared generated state: {1}. " +
+                      "It is cloned by the runtime cloner, which runs its own tracking state, so the required graph-wide guarantee " +
+                      "cannot be served. Make the listed members use a type the generator can clone (a concrete clonable or implicitly " +
+                      "clonable type).";
 
                 context.ReportDiagnostic(Diagnostic.Create(
                     new DiagnosticDescriptor(
                         "FCG013",
                         "Identity preservation cannot be guaranteed for a required capability",
-                        "'[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]' requires type '{0}' to serve " +
-                        "FastDeepClone(FastCloneOptions.PreserveIdentity), directly or as part of a required graph, but part " +
-                        "of its graph is necessarily cloned by the runtime cloner, which runs its own tracking state: {1}. " +
-                        "The operation-level overload is therefore not generated for '{0}'. " +
-                        "Make the listed members use a type the generator can clone (a concrete clonable or implicitly clonable type).",
+                        message,
                         "FastCloner",
                         DiagnosticSeverity.Error,
                         isEnabledByDefault: true),

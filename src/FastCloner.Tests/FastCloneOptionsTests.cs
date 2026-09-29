@@ -13,10 +13,41 @@ namespace FastCloner.Tests;
 /// for every helper path the generated graph uses (direct clonable members, implicit POCOs,
 /// collections, dictionaries and arrays), while ordinary calls keep resolving the type's and
 /// members' configured defaults exactly as before.
+/// <br/><br/>
+/// The overload is part of this discovery feature, so it is only generated for roots a
+/// <c>PreserveIdentity = true</c> discovery surface names directly - not for every root that happens
+/// to configure <c>[FastClonerPreserveIdentity]</c>. <see cref="DiscoveryPoints"/> names the fixtures
+/// below.
 /// </summary>
 [SourceGeneratorCompatible]
 public class FastCloneOptionsTests
 {
+    /// <summary>
+    /// A preserving discovery surface: naming a type here is what makes it expose
+    /// <c>FastDeepClone(FastCloneOptions)</c>.
+    /// </summary>
+    [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+    public interface IPreservingSurface<T>
+    {
+    }
+
+    /// <summary>
+    /// The discovery points for this file's fixtures. Each entry is a closed usage that names a root
+    /// which the explicit operation is exercised against, so the reason for every exposed overload
+    /// stays visible in one place.
+    /// </summary>
+    private static readonly System.Type[] DiscoveryPoints =
+    [
+        typeof(IPreservingSurface<CollectionNegativeRoot>),
+        typeof(IPreservingSurface<ClonableMemberRoot>),
+        typeof(IPreservingSurface<ImplicitMemberRoot>),
+        typeof(IPreservingSurface<DictionaryNegativeRoot>),
+        typeof(IPreservingSurface<ArrayNegativeRoot>),
+        typeof(IPreservingSurface<InitOnlyCollectionRoot>),
+        typeof(IPreservingSurface<NestedCollectionNegativeRoot>),
+        typeof(IPreservingSurface<PreservingDefaultRoot>)
+    ];
+
     public class OptionNode
     {
         public int Value { get; set; }
@@ -297,22 +328,22 @@ public class FastCloneOptionsTests
 
     /// <summary>
     /// An <c>object</c>-typed member is resolved at runtime, so the generator cannot prove that one
-    /// tracking state covers the whole graph. Rather than promising a guarantee it cannot keep, it
-    /// withholds the operation-level entry point. The ordinary entry point keeps its existing,
-    /// best-effort behavior, and nothing is reported because the type never *required* the operation.
+    /// tracking state covers the whole graph. On top of that, this root is not part of the discovery
+    /// feature at all. The ordinary entry point keeps its existing behavior, the root keeps its
+    /// configured identity default, and its generated public surface is unchanged.
     /// </summary>
     [Test]
-    public async Task ObjectTypedMember_ShouldWithholdThePreservingOperation()
+    public async Task ObjectTypedMember_ShouldNotGainTheOperationOverload()
     {
         await Assert.That(HasOptionsOverload(typeof(ObjectMemberRoot))).IsFalse()
-            .Because("an object-typed member is handed to the runtime cloner, which runs its own tracking state");
+            .Because("the root is not named by a preserving discovery surface, so this new API does not apply to it");
 
         OptionNode shared = new() { Value = 11 };
         ObjectMemberRoot original = new() { First = shared, Second = shared };
 
         ObjectMemberRoot ordinary = original.FastDeepClone();
         await Assert.That(ordinary.First).IsNotSameReferenceAs(ordinary.Second)
-            .Because("the default fast path is unchanged");
+            .Because("an object-typed member is handed to the runtime cloner, which keeps its own state");
         await Assert.That(((OptionNode)ordinary.First!).Value).IsEqualTo(11);
     }
 
@@ -335,15 +366,22 @@ public class FastCloneOptionsTests
 
     [Test]
     [SourceGeneratorCompatible]
-    public async Task OperationOverload_ShouldExistWhereIdentityIsConfigured()
+    public async Task OperationOverload_ShouldExistOnlyForDirectlyDiscoveredRoots()
     {
-        // A type that says nothing about identity keeps its surface unchanged: the option cannot be
+        await Assert.That(DiscoveryPoints.Length).IsGreaterThan(0)
+            .Because("the discovery points are what expose the operation to the fixtures below");
+
+        // A root that says nothing about identity keeps its surface unchanged: the option cannot be
         // requested where the generator was not asked to support it.
         await Assert.That(HasOptionsOverload(typeof(NoIdentityConfigurationRoot))).IsFalse();
 
-        // A type that configures identity - for the type or for one of its members - must expose it.
-        await Assert.That(HasOptionsOverload(typeof(MemberConfigurationOnlyRoot))).IsTrue();
+        // Configuring identity is *not* a reason to grow the new public API: an existing
+        // [FastClonerPreserveIdentity] root keeps exactly the surface it had before this feature.
+        await Assert.That(HasOptionsOverload(typeof(MemberConfigurationOnlyRoot))).IsFalse();
+
+        // Being named directly by a PreserveIdentity = true surface is.
         await Assert.That(HasOptionsOverload(typeof(CollectionNegativeRoot))).IsTrue();
+        await Assert.That(HasOptionsOverload(typeof(ClonableMemberRoot))).IsTrue();
     }
 
     /// <summary>

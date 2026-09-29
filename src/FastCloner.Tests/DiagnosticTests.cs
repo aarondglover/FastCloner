@@ -854,7 +854,8 @@ public class PolySub : PolyRoot
             .Because("the required capability cannot be supplied: " +
                      string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
         await Assert.That(required[0].Severity).IsEqualTo(DiagnosticSeverity.Error);
-        await Assert.That(required[0].GetMessage()).Contains("PreserveIdentity");
+        await Assert.That(required[0].GetMessage()).Contains("directly requires");
+        await Assert.That(required[0].GetMessage()).Contains("FastDeepClone(FastCloneOptions.PreserveIdentity)");
         await Assert.That(required[0].GetMessage()).Contains("not generated");
 
         List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
@@ -991,6 +992,66 @@ public class PolySub : PolyRoot
             .Because("the existing runtime fallback behavior of the type is unchanged");
         await Assert.That(file).Contains("FastDeepClone(this global::TestNamespace.Configured? source)")
             .Because("the existing default entry point stays exactly as it was");
+    }
+
+    /// <summary>
+    /// A hard requirement propagates through a required graph, so a boundary two hops down still
+    /// invalidates the guarantee. The message has to describe that type as an offending part of the
+    /// required graph - it deliberately does not expose the operation itself, so the diagnostic must
+    /// not claim it was asked to.
+    /// </summary>
+    [Test]
+    public async Task TransitivelyRequiredRootWithRuntimeBoundary_ShouldReportFCG013AsPartOfTheGraph()
+    {
+        const string source = DiscoverySurfacePrefix + """
+
+            [FastClonerClonable]
+            public class HopB
+            {
+                public object? Opaque { get; set; }
+            }
+
+            [FastClonerClonable]
+            public class HopA
+            {
+                public HopB? B { get; set; }
+            }
+
+            [FastClonerClonable]
+            public class HopRoot
+            {
+                public HopA? A { get; set; }
+            }
+
+            [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+            public interface ISurface<T>
+            {
+            }
+
+            public class Consumer
+            {
+                public ISurface<HopRoot>? Surface { get; set; }
+            }
+            """;
+
+        (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
+
+        Diagnostic[] required = [.. generatorDiags.Where(d => d.Id == "FCG013")];
+
+        await Assert.That(required.Length).IsEqualTo(1)
+            .Because("only the offending part of the graph reports it: " +
+                     string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
+        await Assert.That(required[0].Severity).IsEqualTo(DiagnosticSeverity.Error);
+        await Assert.That(required[0].GetMessage()).Contains("HopB");
+        await Assert.That(required[0].GetMessage()).Contains("part of a graph whose root requires identity preservation");
+        await Assert.That(required[0].GetMessage()).DoesNotContain("to expose")
+            .Because("a transitively required type deliberately does not expose the operation itself");
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string rootFile = generated.Single(g => g.HintName == "TestNamespace_HopRoot_FastDeepClone.g.cs").Text;
+
+        await Assert.That(rootFile).Contains("FastCloneOptions options")
+            .Because("the directly required root still exposes the operation");
     }
 
     #endregion

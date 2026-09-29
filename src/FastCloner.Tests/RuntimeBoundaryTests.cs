@@ -18,6 +18,25 @@ namespace FastCloner.Tests;
 [SourceGeneratorCompatible]
 public class RuntimeBoundaryTests
 {
+    /// <summary>
+    /// A preserving discovery surface: naming a type here is what makes it expose
+    /// <c>FastDeepClone(FastCloneOptions)</c>.
+    /// </summary>
+    [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+    public interface IPreservingSurface<T>
+    {
+    }
+
+    /// <summary>
+    /// The discovery points for this file. Only the roots named here expose the operation-level
+    /// overload; everything they reach transitively only gains the capability to honor the state.
+    /// </summary>
+    private static readonly System.Type[] DiscoveryPoints =
+    [
+        typeof(IPreservingSurface<NonPublicCollectionRoot>),
+        typeof(IPreservingSurface<TransitiveParentRoot>)
+    ];
+
     public class BoundaryLeaf
     {
         public int Value { get; set; }
@@ -164,12 +183,43 @@ public class RuntimeBoundaryTests
         public TransitiveChild Child { get; set; } = new();
     }
 
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity]
+    public class IdentityConfiguredOnlyRoot
+    {
+        public List<BoundaryLeaf> Items { get; set; } = [];
+    }
+
+    /// <summary>
+    /// An existing <c>[FastClonerPreserveIdentity]</c> root keeps exactly the generated surface it
+    /// had before this feature. Its ordinary behaviour is unchanged; it simply is not part of the
+    /// discovery feature that introduces the overload.
+    /// </summary>
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task IdentityConfiguredRoot_ShouldNotGainTheOperationOverload()
+    {
+        await Assert.That(DiscoveryPoints.Length).IsGreaterThan(0)
+            .Because("the discovery points listed above are the only source of the overload");
+
+        await Assert.That(HasOptionsOverload<IdentityConfiguredOnlyRoot>()).IsFalse()
+            .Because("configuring identity predates this API and is not a reason to add a new public overload");
+
+        BoundaryLeaf shared = new() { Value = 6 };
+        IdentityConfiguredOnlyRoot original = new() { Items = [shared, shared] };
+
+        IdentityConfiguredOnlyRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone.Items[0]).IsSameReferenceAs(clone.Items[1])
+            .Because("the existing configured identity default keeps driving ordinary cloning exactly as before");
+    }
+
     [Test]
     [SourceGeneratorCompatible]
     public async Task TransitivelyCapableType_ShouldNotGainTheOperationOverload()
     {
         await Assert.That(HasOptionsOverload<TransitiveParentRoot>()).IsTrue()
-            .Because("the parent configures identity itself");
+            .Because("the root is named directly by a preserving discovery surface");
 
         await Assert.That(HasOptionsOverload<TransitiveChild>()).IsFalse()
             .Because("the child is only state capable because the parent's graph reaches it");

@@ -529,6 +529,11 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
     [SourceGeneratorCompatible]
     public async Task ExplicitlyDisabledIdentityType_ShouldKeepDefaultAndHonorTheExplicitOperation()
     {
+        // The discovery surface is what exposes the operation; the type's own [false] configuration
+        // keeps governing ordinary calls and does not interfere with the requested operation.
+        IDiscoveryPreservingSurface<DiscoveryNonPreservingPayload>? surface = null;
+        await Assert.That(surface).IsNull();
+
         DiscoveryNonPreservingNode shared = new() { Value = 5 };
         DiscoveryNonPreservingPayload original = new() { Name = "x", Left = shared, Right = shared };
 
@@ -561,6 +566,10 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
     [SourceGeneratorCompatible]
     public async Task ExplicitlyEnabledIdentityType_ShouldKeepItsDefaultAndAlsoServeTheExplicitOperation()
     {
+        // Discovery names the root directly; the type's own [true] default is untouched by it.
+        IDiscoveryPreservingSurface<DiscoveryPreservingPayload>? surface = null;
+        await Assert.That(surface).IsNull();
+
         DiscoveryPreservingNode shared = new() { Value = 13 };
         DiscoveryPreservingPayload original = new() { Name = "y", Left = shared, Right = shared };
 
