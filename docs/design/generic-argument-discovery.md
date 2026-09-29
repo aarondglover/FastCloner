@@ -1,12 +1,28 @@
 # Generic argument discovery points
 
-## Goal
+## Summary
 
-Allow FastCloner source generation to treat closed generic arguments observed through explicitly marked generic API surfaces as clone roots.
+Allow generic declarations and API surfaces to opt into FastCloner source-generation discovery.
 
-This extends root discovery only. It does not introduce a new cloning mechanism or change FastCloner's existing recursive graph analysis and code generation.
+A marked API surface becomes a discovery point: when FastCloner observes it being used in a closed generic form, the closed generic arguments are treated as clone roots and passed into the existing source-generation analysis pipeline.
 
-## Proposed API
+Proposed API:
+
+```csharp
+[FastClonerDiscoverGenericArguments]
+```
+
+with optional identity preservation:
+
+```csharp
+[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+```
+
+## Motivation
+
+FastCloner already discovers closed generic usages for types it knows are cloning roots. The missing capability is a reusable way to declare that a generic API surface itself should act as the discovery point.
+
+For example:
 
 ```csharp
 [FastClonerDiscoverGenericArguments]
@@ -15,15 +31,15 @@ public interface IContainer<T>
 }
 ```
 
-A closed usage such as:
+A consumer usage such as:
 
 ```csharp
 IContainer<Order>
 ```
 
-would cause `Order` to be treated as a source-generation root.
+would cause `Order` to become a FastCloner source-generation root.
 
-The same concept should apply to other generic declarations and API surfaces:
+The same concept should apply consistently across generic API shapes:
 
 ```csharp
 [FastClonerDiscoverGenericArguments]
@@ -55,11 +71,7 @@ public static class Operations
 }
 ```
 
-## Discovery semantics
-
-When a marked API surface is observed in a closed generic form, all relevant closed generic arguments are treated as clone roots.
-
-Examples:
+Closed usages such as:
 
 ```csharp
 Pipeline<Order, Result>
@@ -68,55 +80,121 @@ IStage<Form>
 Operations.Execute<Request, Response, Context>()
 ```
 
-For a marked member on a generic containing type, discovery should consider both:
+would expose the relevant closed generic arguments as clone roots.
 
-- generic arguments belonging to the member itself, where applicable;
+## Discovery semantics
+
+The attribute is a source-generation discovery declaration, not a new cloning mechanism.
+
+When a marked API surface is observed in a closed generic context:
+
+1. Resolve the closed generic arguments represented by that usage.
+2. Treat all relevant closed generic arguments as clone roots.
+3. Feed those roots into FastCloner's existing type analysis and code-generation pipeline.
+4. Reuse existing recursive discovery for nested types, collections, dictionaries and supported polymorphic paths.
+
+For a marked method declared on a generic containing type, both sources of closed generic information should be considered:
+
+- generic arguments belonging to the method itself;
 - generic arguments belonging to the closed containing type.
 
-Open or unbound generic arguments should be ignored until a closed usage is available.
+Example:
 
-Once a concrete root is discovered, it should flow through FastCloner's existing recursive type analysis and code-generation pipeline.
+```csharp
+public interface IStage<TContext>
+{
+    [FastClonerDiscoverGenericArguments]
+    void Execute<TInput, TOutput>();
+}
+```
+
+A closed use of:
+
+```csharp
+IStage<Context>.Execute<Request, Response>()
+```
+
+would expose `Context`, `Request`, and `Response` as roots.
+
+Open or unbound generic arguments should not produce roots, consistent with existing FastCloner generic discovery.
 
 ## Identity preservation
 
-A discovery point may optionally require identity-preserving cloning:
+Some discovery points require graph identity to be preserved during cloning.
+
+The proposed API allows this to be declared alongside discovery:
 
 ```csharp
 [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
 ```
 
-This should reuse FastCloner's existing identity-tracking semantics.
+This should reuse FastCloner's existing identity-preservation machinery rather than introduce separate semantics.
 
-Given:
-
-```text
-source:
-
-A ──► B ◄── C
-```
-
-the clone should preserve the same internal reference topology while remaining detached from the source graph:
+For example:
 
 ```text
-clone:
+source:                 clone:
 
-A' ──► B' ◄── C'
+A ──► B ◄── C           A' ──► B' ◄── C'
 ```
 
-That means repeated references to the same source object resolve to the same cloned object, while distinct source objects remain distinct.
+The clone is detached from the source graph, while repeated references to the same source object remain repeated references to the same cloned object.
 
-## Non-goals
+`PreserveIdentity = false` is the default and retains FastCloner's current default behavior.
 
-This proposal does not:
+## Proposed attribute surface
 
-- introduce a new clone engine;
-- change existing `FastClonerClonable`, `FastClonerInclude`, or `FastClonerRegister` semantics;
-- require domain types to opt into this discovery mechanism;
-- select only one generic argument by position;
-- change existing runtime reflection behavior.
+Initial target set:
 
-## Implementation direction
+```csharp
+[AttributeUsage(
+    AttributeTargets.Class |
+    AttributeTargets.Struct |
+    AttributeTargets.Interface |
+    AttributeTargets.Delegate |
+    AttributeTargets.Method)]
+public sealed class FastClonerDiscoverGenericArgumentsAttribute : Attribute
+{
+    public bool PreserveIdentity { get; init; }
+}
+```
 
-The source generator should discover marked generic declarations or members from consumer syntax/semantic usage, resolve their constructed generic context, collect the closed generic arguments, and feed those types into the same root-analysis path used by existing generic discovery.
+The exact public shape is subject to upstream maintainer preference.
 
-The implementation should preserve FastCloner's incremental-generator characteristics and avoid introducing broad compilation invalidation.
+## Design constraints
+
+- Do not require consumer domain types to carry FastCloner attributes solely to become roots discovered through another generic API.
+- Do not introduce a second cloning pipeline.
+- Do not select only a particular generic parameter by index; all relevant closed generic arguments should be considered.
+- Reuse existing FastCloner type modelling, recursive graph analysis and generated cloning paths.
+- Keep identity preservation orthogonal to normal clone behavior and implement it using the existing state-tracking machinery.
+- Avoid runtime reflection for discovery; this is intended to be a compile-time source-generator capability.
+
+## Likely generator integration
+
+The existing generic usage discovery already inspects closed generic syntax and resolves symbols. This feature should extend that discovery so that a closed usage can also qualify because the referenced declaration or API surface carries `FastClonerDiscoverGenericArgumentsAttribute`.
+
+The implementation should preferably feed discovered types into the same model-building path used by existing generic discovery rather than duplicate type analysis or code generation.
+
+The exact Roslyn pipeline shape should be chosen to preserve FastCloner's current incremental-generation characteristics.
+
+## Validation
+
+Tests should cover at least:
+
+- generic class discovery;
+- generic struct discovery;
+- generic interface discovery;
+- generic delegate discovery;
+- generic method discovery;
+- a marked method on a generic containing type;
+- multiple generic arguments;
+- nested generic arguments;
+- open generic arguments being ignored;
+- `PreserveIdentity = true` preserving shared-reference topology;
+- default discovery retaining existing identity behavior;
+- referenced-assembly declarations acting as discovery points from a consuming compilation.
+
+## Status
+
+Design proposal only. Implementation should wait for upstream feedback on whether this capability and public API shape fit FastCloner's direction.
