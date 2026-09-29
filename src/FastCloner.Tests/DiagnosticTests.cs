@@ -856,6 +856,12 @@ public class PolySub : PolyRoot
         await Assert.That(required[0].Severity).IsEqualTo(DiagnosticSeverity.Error);
         await Assert.That(required[0].GetMessage()).Contains("PreserveIdentity");
         await Assert.That(required[0].GetMessage()).Contains("not generated");
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string formFile = generated.Single(g => g.HintName == "TestNamespace_Form_FastDeepClone.g.cs").Text;
+
+        await Assert.That(formFile).DoesNotContain("FastCloneOptions options")
+            .Because("an unsatisfied requirement must not be exposed as a best-effort operation");
     }
 
     /// <summary>
@@ -896,7 +902,6 @@ public class PolySub : PolyRoot
         await Assert.That(generatorDiags.Where(d => d.Id is "FCG013" or "FCG014")).IsEmpty()
             .Because("the graph can carry one tracking state: " +
                      string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
-
         List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
         string rootFile = generated.Single(g => g.HintName == "TestNamespace_Root_FastDeepClone.g.cs").Text;
 
@@ -942,12 +947,13 @@ public class PolySub : PolyRoot
     }
 
     /// <summary>
-    /// A type that configures identity itself does want the guarantee, so it is told (as a warning
-    /// rather than an error, because the runtime fallback for its member is pre-existing behavior)
-    /// why the operation-level entry point is not offered.
+    /// A type that configures identity itself predates the new operation-level API. If its graph
+    /// crosses a runtime boundary, its existing <c>FastDeepClone()</c> behavior is unchanged and it
+    /// simply does not gain the new overload. Reporting a warning would be noise for consumers who
+    /// never asked for that API.
     /// </summary>
     [Test]
-    public async Task IdentityConfiguredRootWithRuntimeResolvedMember_ShouldReportFCG014()
+    public async Task IdentityConfiguredRootWithRuntimeResolvedMember_ShouldStaySilentAndKeepItsDefault()
     {
         const string source = """
             #nullable enable
@@ -955,26 +961,36 @@ public class PolySub : PolyRoot
 
             namespace TestNamespace;
 
+            public class Payload
+            {
+                public int Value { get; set; }
+            }
+
             [FastClonerClonable]
             [FastClonerPreserveIdentity]
             public class Configured
             {
-                public object? Payload { get; set; }
+                public object? Opaque { get; set; }
+                public Payload? First { get; set; }
+                public Payload? Second { get; set; }
             }
             """;
 
         (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
 
-        Diagnostic[] warnings = [.. generatorDiags.Where(d => d.Id == "FCG014")];
-
-        await Assert.That(warnings.Length).IsEqualTo(1)
-            .Because(string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
-        await Assert.That(warnings[0].Severity).IsEqualTo(DiagnosticSeverity.Warning);
+        await Assert.That(generatorDiags.Where(d => d.Id.StartsWith("FCG") && d.Severity == DiagnosticSeverity.Warning)).IsEmpty()
+            .Because("an existing identity configuration must not gain new build noise: " +
+                     string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
 
         List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
         string file = generated.Single(g => g.HintName == "TestNamespace_Configured_FastDeepClone.g.cs").Text;
 
-        await Assert.That(file).DoesNotContain("FastCloneOptions options");
+        await Assert.That(file).DoesNotContain("FastCloneOptions options")
+            .Because("the guarantee cannot be met for this graph, so the new overload is simply not added");
+        await Assert.That(file).Contains("FastCloner.DeepClone(")
+            .Because("the existing runtime fallback behavior of the type is unchanged");
+        await Assert.That(file).Contains("FastDeepClone(this global::TestNamespace.Configured? source)")
+            .Because("the existing default entry point stays exactly as it was");
     }
 
     #endregion

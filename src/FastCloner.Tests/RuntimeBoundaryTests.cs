@@ -1,5 +1,6 @@
 using FastCloner.SourceGenerator.Shared;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace FastCloner.Tests;
@@ -118,4 +119,148 @@ public class RuntimeBoundaryTests
     }
 
     #endregion
+
+    #region Public operation API exposure vs internal state capability
+
+    [FastClonerClonable]
+    public class CycleOnlyRoot
+    {
+        public string Name { get; set; } = string.Empty;
+        public CycleOnlyRoot? Self { get; set; }
+    }
+
+    /// <summary>
+    /// Needing a tracking state internally (here for circular references) is a capability, not a
+    /// request for the public operation API.
+    /// </summary>
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task CycleOnlyRoot_ShouldNotGainTheOperationOverload()
+    {
+        CycleOnlyRoot original = new() { Name = "cycle" };
+        original.Self = original;
+
+        CycleOnlyRoot clone = original.FastDeepClone();
+
+        await Assert.That(clone).IsNotSameReferenceAs(original);
+        await Assert.That(clone.Self).IsSameReferenceAs(clone)
+            .Because("the root's generated implementation already carries state machinery for the cycle");
+
+        await Assert.That(HasOptionsOverload<CycleOnlyRoot>()).IsFalse()
+            .Because("being state capable is not a reason to expose the operation-level API");
+    }
+
+    [FastClonerClonable]
+    public class TransitiveChild
+    {
+        public List<BoundaryLeaf> Items { get; set; } = [];
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(false)]
+    public class TransitiveParentRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public TransitiveChild Child { get; set; } = new();
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task TransitivelyCapableType_ShouldNotGainTheOperationOverload()
+    {
+        await Assert.That(HasOptionsOverload<TransitiveParentRoot>()).IsTrue()
+            .Because("the parent configures identity itself");
+
+        await Assert.That(HasOptionsOverload<TransitiveChild>()).IsFalse()
+            .Because("the child is only state capable because the parent's graph reaches it");
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task TransitivelyCapableType_ShouldStillHonorTheParentsPreservingState()
+    {
+        BoundaryLeaf shared = new() { Value = 7 };
+        TransitiveParentRoot original = new();
+        original.Child.Items = [shared, shared];
+
+        TransitiveParentRoot preserving = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+
+        await Assert.That(preserving.Child.Items[0]).IsSameReferenceAs(preserving.Child.Items[1])
+            .Because("the internal generated path must keep accepting the parent's preserving state");
+    }
+
+    #endregion
+
+    #region Two-hop required graph
+
+    [FastClonerClonable]
+    public class HopLeaf
+    {
+        public int Value { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class HopB
+    {
+        public HopLeaf? Left { get; set; }
+        public HopLeaf? Right { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class HopA
+    {
+        public HopB? B { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class HopRoot
+    {
+        public HopA? A { get; set; }
+    }
+
+    [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+    public interface IHopSurface<T>
+    {
+    }
+
+    /// <summary>
+    /// The requirement, the capability and the state have to survive <c>HopRoot → HopA → HopB</c>
+    /// (two generated file hops), while only the directly required root grows the public API.
+    /// </summary>
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task TwoHopRequiredGraph_ShouldCarryTheRequirementAndTheState()
+    {
+        IHopSurface<HopRoot>? surface = null;
+        await Assert.That(surface).IsNull();
+
+        await Assert.That(HasOptionsOverload<HopRoot>()).IsTrue()
+            .Because("the PreserveIdentity = true surface names this root directly");
+        await Assert.That(HasOptionsOverload<HopA>()).IsFalse()
+            .Because("it is required only because the root's graph reaches it");
+        await Assert.That(HasOptionsOverload<HopB>()).IsFalse()
+            .Because("it is required only because the root's graph reaches it two hops down");
+
+        HopLeaf shared = new() { Value = 8 };
+        HopRoot original = new() { A = new HopA { B = new HopB { Left = shared, Right = shared } } };
+
+        HopRoot preserving = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+
+        await Assert.That(preserving.A!.B!.Left).IsSameReferenceAs(preserving.A.B.Right)
+            .Because("capability closure must reach the second generated hop");
+    }
+
+    #endregion
+
+    private static bool HasOptionsOverload<T>()
+    {
+        string extensionTypeName = $"FastCloner.Tests.{typeof(T).Name}FastDeepCloneExtensions";
+        System.Type? extensions = typeof(RuntimeBoundaryTests).Assembly.GetType(extensionTypeName)
+            ?? throw new System.InvalidOperationException($"No generated extension class '{extensionTypeName}' for {typeof(T)}");
+
+        return extensions.GetMethods().Any(method =>
+            method.Name == "FastDeepClone" &&
+            method.GetParameters().Length == 2 &&
+            method.GetParameters()[1].ParameterType == typeof(FastCloneOptions));
+    }
 }

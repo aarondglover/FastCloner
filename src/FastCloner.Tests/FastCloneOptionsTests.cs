@@ -298,13 +298,13 @@ public class FastCloneOptionsTests
     /// <summary>
     /// An <c>object</c>-typed member is resolved at runtime, so the generator cannot prove that one
     /// tracking state covers the whole graph. Rather than promising a guarantee it cannot keep, it
-    /// withholds the operation-level entry point (and reports a warning explaining why). The ordinary
-    /// entry point keeps its existing, best-effort behavior.
+    /// withholds the operation-level entry point. The ordinary entry point keeps its existing,
+    /// best-effort behavior, and nothing is reported because the type never *required* the operation.
     /// </summary>
     [Test]
     public async Task ObjectTypedMember_ShouldWithholdThePreservingOperation()
     {
-        await Assert.That(HasOptionsOverload("FastCloner.Tests.FastCloneOptionsTests.ObjectMemberRootFastDeepCloneExtensions")).IsFalse()
+        await Assert.That(HasOptionsOverload(typeof(ObjectMemberRoot))).IsFalse()
             .Because("an object-typed member is handed to the runtime cloner, which runs its own tracking state");
 
         OptionNode shared = new() { Value = 11 };
@@ -339,17 +339,35 @@ public class FastCloneOptionsTests
     {
         // A type that says nothing about identity keeps its surface unchanged: the option cannot be
         // requested where the generator was not asked to support it.
-        await Assert.That(HasOptionsOverload("FastCloner.Tests.NoIdentityConfigurationRootFastDeepCloneExtensions")).IsFalse();
+        await Assert.That(HasOptionsOverload(typeof(NoIdentityConfigurationRoot))).IsFalse();
 
         // A type that configures identity - for the type or for one of its members - must expose it.
-        await Assert.That(HasOptionsOverload("FastCloner.Tests.MemberConfigurationOnlyRootFastDeepCloneExtensions")).IsTrue();
-        await Assert.That(HasOptionsOverload("FastCloner.Tests.CollectionNegativeRootFastDeepCloneExtensions")).IsTrue();
+        await Assert.That(HasOptionsOverload(typeof(MemberConfigurationOnlyRoot))).IsTrue();
+        await Assert.That(HasOptionsOverload(typeof(CollectionNegativeRoot))).IsTrue();
+    }
+
+    /// <summary>
+    /// Reflection helper over the generated extension class. It throws when the class is missing so a
+    /// "should not contain" assertion cannot pass vacuously.
+    /// </summary>
+    private static bool HasOptionsOverload(System.Type type)
+    {
+        string extensionTypeName = $"FastCloner.Tests.{type.Name}FastDeepCloneExtensions";
+        System.Type? extensions = typeof(FastCloneOptionsTests).Assembly.GetType(extensionTypeName)
+            ?? throw new InvalidOperationException($"No generated extension class '{extensionTypeName}' for {type}");
+
+        return extensions.GetMethods().Any(method =>
+            method.Name == "FastDeepClone" &&
+            method.GetParameters().Length == 2 &&
+            method.GetParameters()[1].ParameterType == typeof(FastCloneOptions));
     }
 
     private static bool HasOptionsOverload(string extensionTypeName)
     {
-        System.Type? extensions = typeof(FastCloneOptionsTests).Assembly.GetType(extensionTypeName);
-        return extensions != null && extensions.GetMethods().Any(method =>
+        System.Type? extensions = typeof(FastCloneOptionsTests).Assembly.GetType(extensionTypeName)
+            ?? throw new InvalidOperationException($"No generated extension class '{extensionTypeName}'");
+
+        return extensions.GetMethods().Any(method =>
             method.Name == "FastDeepClone" &&
             method.GetParameters().Length == 2 &&
             method.GetParameters()[1].ParameterType == typeof(FastCloneOptions));
