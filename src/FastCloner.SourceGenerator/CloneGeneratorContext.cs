@@ -104,6 +104,31 @@ internal sealed class CloneGeneratorContext
 
     public bool HasPendingHelperMethods => _pendingHelperMethods.Count > 0;
 
+    /// <summary>
+    /// Expression that keeps the state when it belongs to an explicit preserving operation and falls
+    /// back to <paramref name="fallback"/> otherwise. An explicit operation is the strongest identity
+    /// requirement for its invocation, so it has to win over member-level opt-outs.
+    /// </summary>
+    public static string PreservingOperationState(string stateVar, string fallback)
+    {
+        return $"{stateVar} is {{ IsPreservingOperation: true }} ? {stateVar} : {fallback}";
+    }
+
+    /// <summary>
+    /// Whether an implicit clone can be inlined. Inlining copies members without registering the
+    /// clone in the tracking state, so a file that has to carry identity has to keep the helper call
+    /// for reference-typed implicit clones: an explicit preserving operation has to see them.
+    /// </summary>
+    public bool CanInline(string typeFullName, bool isValueType, string stateVar)
+    {
+        // Inlining is only valid when no state that could need a registration is in scope: the
+        // ordinary fast path (a null state), a file that cannot carry identity at all, or a value
+        // type, which has no identity to register.
+        bool carriesIdentity = StateCapable || RequiresIdentityOptOutPropagation;
+
+        return ShouldInline(typeFullName) && (isValueType || !carriesIdentity || stateVar == "null");
+    }
+
     public string DequeuePendingHelperMethod() => _pendingHelperMethods.Dequeue();
 
     public bool TryGetImplicitTypeModel(string typeName, out TypeModel model)

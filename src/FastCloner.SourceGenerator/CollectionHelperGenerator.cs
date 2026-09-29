@@ -436,7 +436,7 @@ internal static class CollectionHelperGenerator
 
         if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
         {
-            if (context.ShouldInline(implicitModel.FullyQualifiedName))
+            if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, parentNeedsState ? "state" : "null"))
             {
                 string actualStateVarInline = parentNeedsState ? "state" : "null";
                 return MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, itemVar, actualStateVarInline, "                ", true) + "!";
@@ -679,7 +679,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.TryGetImplicitTypeModel(member.KeyTypeName!, out TypeModel implicitKeyModel))
             {
-                if (context.ShouldInline(implicitKeyModel.FullyQualifiedName))
+                if (context.CanInline(implicitKeyModel.FullyQualifiedName, implicitKeyModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     keyExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitKeyModel, "kvp.Key", actualStateVar, "                ", true) + "!";
@@ -715,7 +715,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.TryGetImplicitTypeModel(member.ValueTypeName!, out TypeModel implicitValModel))
             {
-                if (context.ShouldInline(implicitValModel.FullyQualifiedName))
+                if (context.CanInline(implicitValModel.FullyQualifiedName, implicitValModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     valExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitValModel, "kvp.Value", actualStateVar, "                ", true) + "!";
@@ -802,7 +802,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
             {
-                if (context.ShouldInline(implicitModel.FullyQualifiedName))
+                if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, "source[i]", actualStateVar, "                ", true) + "!";
@@ -912,7 +912,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
             {
-                if (context.ShouldInline(implicitModel.FullyQualifiedName))
+                if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, $"source[{indexList}]", actualStateVar, "                ", true) + "!";

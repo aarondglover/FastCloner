@@ -23,22 +23,38 @@ public sealed class FcGeneratedCloneState
     /// Types whose subgraph can contain cycles ignore the request and allocate real state,
     /// because circular reference detection must keep working.
     /// </summary>
-    public static readonly FcGeneratedCloneState NoReferenceTracking = new FcGeneratedCloneState(trackReferences: false);
+    public static readonly FcGeneratedCloneState NoReferenceTracking = new FcGeneratedCloneState(trackReferences: false, preservingOperation: false);
 
     private readonly bool _trackReferences;
     private readonly ConcurrentDictionary<object, object> _knownRefs = new ConcurrentDictionary<object, object>(ReferenceEqualityComparer.Instance);
 
     /// <summary>
-    /// Creates a state that tracks cloned references.
+    /// <summary>
+    /// Creates a state that tracks cloned references, for the type's configured cloning behavior
+    /// (cycles and identity preservation as declared by the type and its members).
     /// </summary>
     public FcGeneratedCloneState()
-        : this(trackReferences: true)
+        : this(trackReferences: true, preservingOperation: false)
     {
     }
 
-    private FcGeneratedCloneState(bool trackReferences)
+    /// <summary>
+    /// Creates a state for an explicit operation. <paramref name="preservingOperation"/> marks the
+    /// state as belonging to a <c>FastDeepClone(FastCloneOptions.PreserveIdentity)</c> call, which
+    /// requires identity preservation across everything that is deep cloned. Member-level
+    /// configuration such as <c>[FastClonerPreserveIdentity(false)]</c> is a default and must not
+    /// weaken such an operation, so a preserving state always tracks references.
+    /// </summary>
+    /// <param name="preservingOperation">True for an explicit identity-preserving operation.</param>
+    public FcGeneratedCloneState(bool preservingOperation)
+        : this(trackReferences: true, preservingOperation: preservingOperation)
+    {
+    }
+
+    private FcGeneratedCloneState(bool trackReferences, bool preservingOperation)
     {
         _trackReferences = trackReferences;
+        IsPreservingOperation = preservingOperation;
     }
 
     /// <summary>
@@ -46,6 +62,15 @@ public sealed class FcGeneratedCloneState
     /// requested reference, so no identity is preserved through it.
     /// </summary>
     public bool TrackReferences => _trackReferences;
+
+    /// <summary>
+    /// True when this state belongs to an explicit identity-preserving operation, i.e.
+    /// <c>FastDeepClone(FastCloneOptions.PreserveIdentity)</c>. Such an operation is the strongest
+    /// identity requirement for its invocation, so member and type level
+    /// <c>[FastClonerPreserveIdentity(false)]</c> defaults must not replace it with
+    /// <see cref="NoReferenceTracking"/>.
+    /// </summary>
+    public bool IsPreservingOperation { get; }
 
     /// <summary>
     /// Registers a known reference mapping from original to clone.

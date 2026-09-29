@@ -54,6 +54,36 @@ internal static class TypeModelFactory
         HashSet<ITypeSymbol> processingStack = TypeAnalyzer.CreateNullabilityAwareSet();
         List<MemberModel> finalMembers = [];
         Dictionary<string, MemberModel> nestedTypes = new Dictionary<string, MemberModel>();
+
+        // Element/key/value types sitting below a nested collection would otherwise have no generated
+        // model, and their clones would be delegated to the runtime cloner (which runs its own
+        // tracking state). Modeling them keeps the whole graph in one generated tracking state, which
+        // is what an explicit identity-preserving operation needs. They are only analyzed for types
+        // whose graph can actually carry a state (see below), so ordinary roots keep their existing
+        // generated output and there is no behavior change for calls without a state.
+        List<ITypeSymbol> nestedLeafTypes = [];
+
+        void AnalyzeNestedLeafType(ITypeSymbol leaf)
+        {
+            if (ImplicitTypeAnalyzer.TryAnalyze(leaf, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel) &&
+                implicitModel != null &&
+                !relatedTypes.ContainsKey(implicitModel.FullyQualifiedName))
+            {
+                relatedTypes[implicitModel.FullyQualifiedName] = implicitModel;
+
+                foreach (TypeModel? rel in implicitModel.RelatedTypes)
+                {
+                    if (!relatedTypes.ContainsKey(rel.FullyQualifiedName))
+                        relatedTypes[rel.FullyQualifiedName] = rel;
+                }
+
+                foreach (MemberModel nested in implicitModel.NestedTypes)
+                {
+                    if (!nestedTypes.ContainsKey(nested.TypeFullName))
+                        nestedTypes[nested.TypeFullName] = nested;
+                }
+            }
+        }
         
         foreach (MemberAnalysis analysis in memberAnalyses)
         {
@@ -102,7 +132,7 @@ internal static class TypeModelFactory
             
             if (memberModel.TypeKind != MemberTypeKind.Implicit)
             {
-                NestedTypeCollector.Collect(memberType, compilation, nullabilityEnabled, nestedTypes);
+                NestedTypeCollector.Collect(memberType, compilation, nullabilityEnabled, nestedTypes, nestedLeafTypes.Add);
                 
                 if (memberModel.TypeKind is MemberTypeKind.Collection or MemberTypeKind.Array)
                 {
@@ -253,9 +283,18 @@ internal static class TypeModelFactory
         // Capability, not behavior: the type keeps its configured default (NeedsStateTracking),
         // but a supplied tracking state has to be honored throughout its graph so that an explicit
         // identity-preserving operation can be served without a second generated implementation.
+        // A type that declares identity configuration for itself or for one of its members is
+        // exactly where the operation-level override has to be available and accurate.
         bool supportsStateTracking = needsStateTracking
                                      || preserveIdentity.HasValue
+                                     || finalMembers.Any(static member => member.PreserveIdentity.HasValue)
                                      || requiresIdentityPreservationCapability;
+
+        if (supportsStateTracking)
+        {
+            foreach (ITypeSymbol leaf in nestedLeafTypes)
+                AnalyzeNestedLeafType(leaf);
+        }
 
         model = new TypeModel(
             TypeAnalyzer.GetNamespace(symbol),

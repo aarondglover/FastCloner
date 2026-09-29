@@ -50,8 +50,8 @@ internal static class MemberCloneGenerator
                     }
                     case MemberTypeKind.Implicit:
                     {
-                        if (context.ShouldInline(member.TypeFullName) && 
-                            context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel))
+                        if (context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel) &&
+                            context.CanInline(member.TypeFullName, implicitModel.IsStruct, stateVar))
                         {
                             bool inlineModelDefault = implicitModel.NeedsStateTracking;
                             bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
@@ -202,8 +202,8 @@ internal static class MemberCloneGenerator
 
                     case MemberTypeKind.Implicit:
                     {
-                        if (context.ShouldInline(member.TypeFullName) && 
-                            context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel))
+                        if (context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel) &&
+                            context.CanInline(member.TypeFullName, implicitModel.IsStruct, stateVar))
                         {
                             bool inlineModelDefault = implicitModel.NeedsStateTracking;
                             bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
@@ -341,16 +341,25 @@ internal static class MemberCloneGenerator
     /// and passing <c>null</c> would let the callee allocate its own tracking state — both re-enable
     /// the identity preservation the member explicitly opted out of.
     /// <br/><br/>
-    /// Exception: inside a body that can close a cycle (<paramref name="cycleContinuity"/>) the
-    /// opt-out keeps the body's state instead. An opted-out edge is allowed to suppress aliasing, but
-    /// it must not discard the map that is closing the cycle it sits on — doing so makes every
-    /// recursive step allocate a fresh map and never recognise the node it is already cloning.
+    /// Two things override that request:
+    /// <list type="bullet">
+    /// <item>inside a body that can close a cycle (<paramref name="cycleContinuity"/>) the opt-out
+    /// keeps the body's state instead — an opted-out edge may suppress aliasing, but it must not
+    /// discard the map that is closing the cycle it sits on, or every recursive step would allocate a
+    /// fresh map and never recognise the node it is already cloning;</item>
+    /// <item>an explicit operation-level <c>FastCloneOptions.PreserveIdentity</c> call, which is the
+    /// strongest identity requirement for its invocation and therefore wins over the opt-out.</item>
+    /// </list>
     /// </summary>
     internal static string GetMemberStateVar(MemberModel member, string stateVar, bool cycleContinuity = false)
     {
-        return member.PreserveIdentity == false && !cycleContinuity
-            ? GeneratedTypeNames.NoTrackingCloneState
-            : stateVar;
+        if (member.PreserveIdentity != false || cycleContinuity)
+            return stateVar;
+
+        if (stateVar == "null")
+            return GeneratedTypeNames.NoTrackingCloneState;
+
+        return CloneGeneratorContext.PreservingOperationState(stateVar, GeneratedTypeNames.NoTrackingCloneState);
     }
 
     /// <summary>

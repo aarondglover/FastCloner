@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
 
@@ -9,7 +10,8 @@ internal static class NestedTypeCollector
         ITypeSymbol type,
         Compilation compilation,
         bool nullabilityEnabled,
-        Dictionary<string, MemberModel> nestedTypes)
+        Dictionary<string, MemberModel> nestedTypes,
+        Action<ITypeSymbol>? collectLeafType = null)
     {
         // Skip safe types (they don't need helpers)
         if (TypeAnalyzer.IsSafeType(type, compilation))
@@ -23,9 +25,9 @@ internal static class NestedTypeCollector
             if (dictTypes.HasValue)
             {
                 // Check Key
-                Collect(dictTypes.Value.KeyType, compilation, nullabilityEnabled, nestedTypes);
+                Collect(dictTypes.Value.KeyType, compilation, nullabilityEnabled, nestedTypes, collectLeafType);
                 // Check Value
-                Collect(dictTypes.Value.ValueType, compilation, nullabilityEnabled, nestedTypes);
+                Collect(dictTypes.Value.ValueType, compilation, nullabilityEnabled, nestedTypes, collectLeafType);
             }
         }
         else if (TypeAnalyzer.IsCollectionType(type)) // Includes Array
@@ -33,8 +35,16 @@ internal static class NestedTypeCollector
             ITypeSymbol? elemType = TypeAnalyzer.GetCollectionElementType(type, compilation);
             if (elemType != null)
             {
-                Collect(elemType, compilation, nullabilityEnabled, nestedTypes);
+                Collect(elemType, compilation, nullabilityEnabled, nestedTypes, collectLeafType);
             }
+        }
+        else
+        {
+            // A non-collection leaf nested inside a collection (e.g. the OptionNode of a
+            // List<List<OptionNode>>). Element types of the *outer* member are analysed by the
+            // caller, but deeper ones would otherwise have no generated model and their clones
+            // would be delegated to the runtime cloner.
+            collectLeafType?.Invoke(type);
         }
         
         // If this type itself is a collection/dictionary that needs a helper (and isn't the root member type we started with)

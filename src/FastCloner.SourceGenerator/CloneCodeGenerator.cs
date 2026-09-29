@@ -338,6 +338,9 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine($"        /// {GeneratedTypeNames.FastCloneOptions}.PreserveIdentity requires reference topology");
         sb.AppendLine($"        /// preservation for this call regardless of the type's default. Without it the call is");
         sb.AppendLine($"        /// identical to FastDeepClone(source), so the type's default behavior is never changed.");
+        sb.AppendLine($"        /// The guarantee covers every part of the graph this generated implementation clones");
+        sb.AppendLine($"        /// itself; members the generator has no model for are handed to the runtime cloner,");
+        sb.AppendLine($"        /// which runs its own tracking state, so preservation is best effort from there on.");
         sb.AppendLine($"        /// </remarks>");
 
         string notNullAttr = CloneGeneratorContext.NotNullIfNotNullAttr(_context.Model.CodeAnalysisAvailable && !isStruct);
@@ -351,7 +354,7 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine($"                return FastDeepClone{typeParams}(source);");
         sb.AppendLine("            }");
         sb.AppendLine();
-        sb.AppendLine($"            return InternalFastDeepClone{typeParams}(source, new {GeneratedTypeNames.CloneState}());");
+        sb.AppendLine($"            return InternalFastDeepClone{typeParams}(source, new {GeneratedTypeNames.CloneState}(preservingOperation: true));");
         sb.AppendLine("        }");
         sb.AppendLine();
     }
