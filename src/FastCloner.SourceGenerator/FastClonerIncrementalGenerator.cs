@@ -146,11 +146,13 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             .Collect()
             .Select(static (results, _) => GenericArgumentDiscoveryCollector.Merge(results));
 
-        // Types that already have a generated root through [FastClonerClonable] keep that single root
-        // and only gain the capability to honor a supplied tracking state. This never changes their
-        // default behavior and never produces a second entry point.
-        IncrementalValueProvider<EquatableArray<string>> identityPreservationRequirements = discoveryResult
-            .Select(static (result, _) => result.IdentityPreservationRequirements);
+        // Types that must be able to honor a supplied tracking state: those that configure identity
+        // (or were discovered with the requirement), plus everything their generated graphs clone
+        // through another generated file. Keeping the closure here means a preserving operation does
+        // not silently stop at a file boundary.
+        IncrementalValueProvider<EquatableArray<string>> identityPreservationRequirements = pipeline.Collect()
+            .Combine(discoveryResult)
+            .Select(static (pair, _) => IdentityCapabilityRequirements.Expand(pair.Left, pair.Right));
 
         IncrementalValuesProvider<Result<TypeModel>> pipelineWithCapability = pipeline
             .Combine(identityPreservationRequirements)
@@ -168,7 +170,20 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             });
 
         IncrementalValuesProvider<DiscoveredGenericRoot> discoveredRoots = discoveryResult
-            .SelectMany(static (result, _) => result.Roots);
+            .SelectMany(static (result, _) => result.Roots)
+            .Combine(identityPreservationRequirements)
+            .Select(static (pair, _) =>
+            {
+                (DiscoveredGenericRoot root, EquatableArray<string> requirements) = pair;
+
+                if (root.Model is not TypeModel model || requirements.Count == 0)
+                    return root;
+
+                if (model.SupportsStateTracking || !requirements.Contains(model.FullyQualifiedName))
+                    return root;
+
+                return new DiscoveredGenericRoot(model with { SupportsStateTracking = true });
+            });
 
         IncrementalValuesProvider<(((DiscoveredGenericRoot Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> discoveryPipeline =
             discoveredRoots.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);

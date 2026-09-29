@@ -142,7 +142,7 @@ internal static class CollectionHelperGenerator
         string typeName = member.TypeFullName;
         string methodName = context.GetMethodName(typeName);
         CollectionKind kind = member.CollectionKind;
-        bool needsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, member);
+        bool needsState = context.MemberCanTrack(member);
         bool isValueType = member.IsValueType;
         
         // Handle special collections
@@ -428,14 +428,14 @@ internal static class CollectionHelperGenerator
         if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
         {
             string helperName = context.GetOrCreateHelperMethodName(nestedModel);
-            bool elementNeedsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, nestedModel);
+            bool elementNeedsState = context.MemberCanTrack(nestedModel);
             string actualStateVar = parentNeedsState ? "state" : "null";
             return GetHelperMethodCall(context, helperName, itemVar, elementNeedsState, actualStateVar);
         }
 
         if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
         {
-            if (context.ShouldInline(implicitModel.FullyQualifiedName))
+            if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, parentNeedsState ? "state" : "null"))
             {
                 string actualStateVarInline = parentNeedsState ? "state" : "null";
                 return MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, itemVar, actualStateVarInline, "                ", true) + "!";
@@ -459,7 +459,7 @@ internal static class CollectionHelperGenerator
         string typeName = member.TypeFullName;
         string methodName = context.GetMethodName(typeName);
         CollectionKind kind = member.CollectionKind;
-        bool needsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, member);
+        bool needsState = context.MemberCanTrack(member);
         bool isValueType = member.IsValueType;
         
         if (kind.ToString().StartsWith("Immutable"))
@@ -672,13 +672,13 @@ internal static class CollectionHelperGenerator
             else if (context.TryGetMemberModel(member.KeyTypeName!, out MemberModel nestedKeyModel))
             {
                 string helperName = context.GetOrCreateHelperMethodName(nestedKeyModel);
-                bool keyNeedsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, nestedKeyModel);
+                bool keyNeedsState = context.MemberCanTrack(nestedKeyModel);
                 string actualStateVar = needsState ? "state" : "null";
                 keyExpr = GetHelperMethodCall(context, helperName, "kvp.Key", keyNeedsState, actualStateVar);
             }
             else if (context.TryGetImplicitTypeModel(member.KeyTypeName!, out TypeModel implicitKeyModel))
             {
-                if (context.ShouldInline(implicitKeyModel.FullyQualifiedName))
+                if (context.CanInline(implicitKeyModel.FullyQualifiedName, implicitKeyModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     keyExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitKeyModel, "kvp.Key", actualStateVar, "                ", true) + "!";
@@ -708,13 +708,13 @@ internal static class CollectionHelperGenerator
             else if (context.TryGetMemberModel(member.ValueTypeName!, out MemberModel nestedValModel))
             {
                 string helperName = context.GetOrCreateHelperMethodName(nestedValModel);
-                bool valNeedsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, nestedValModel);
+                bool valNeedsState = context.MemberCanTrack(nestedValModel);
                 string actualStateVar = needsState ? "state" : "null";
                 valExpr = GetHelperMethodCall(context, helperName, "kvp.Value", valNeedsState, actualStateVar);
             }
             else if (context.TryGetImplicitTypeModel(member.ValueTypeName!, out TypeModel implicitValModel))
             {
-                if (context.ShouldInline(implicitValModel.FullyQualifiedName))
+                if (context.CanInline(implicitValModel.FullyQualifiedName, implicitValModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     valExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitValModel, "kvp.Value", actualStateVar, "                ", true) + "!";
@@ -744,7 +744,7 @@ internal static class CollectionHelperGenerator
         string methodName = context.GetMethodName(typeName);
         bool isSafe = member.ElementIsSafe;
         bool hasClonableAttr = member.ElementHasClonableAttr;
-        bool needsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, member);
+        bool needsState = context.MemberCanTrack(member);
         StringBuilder sb = context.Source;
 
         if (needsState)
@@ -795,13 +795,13 @@ internal static class CollectionHelperGenerator
             else if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
             {
                 string helperName = context.GetOrCreateHelperMethodName(nestedModel);
-                bool elementNeedsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, nestedModel);
+                bool elementNeedsState = context.MemberCanTrack(nestedModel);
                 string actualStateVar = needsState ? "state" : "null";
                 itemExpr = GetHelperMethodCall(context, helperName, "source[i]", elementNeedsState, actualStateVar);
             }
             else if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
             {
-                if (context.ShouldInline(implicitModel.FullyQualifiedName))
+                if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, "source[i]", actualStateVar, "                ", true) + "!";
@@ -841,7 +841,7 @@ internal static class CollectionHelperGenerator
         string methodName = context.GetMethodName(typeName);
         bool isSafe = member.ElementIsSafe;
         bool hasClonableAttr = member.ElementHasClonableAttr;
-        bool needsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, member);
+        bool needsState = context.MemberCanTrack(member);
         int rank = member.ArrayRank;
         StringBuilder sb = context.Source;
 
@@ -905,13 +905,13 @@ internal static class CollectionHelperGenerator
             else if (context.TryGetMemberModel(member.ElementTypeName!, out MemberModel nestedModel))
             {
                 string helperName = context.GetOrCreateHelperMethodName(nestedModel);
-                bool elementNeedsState = MemberCloneGenerator.MemberNeedsCircularRefTracking(context, nestedModel);
+                bool elementNeedsState = context.MemberCanTrack(nestedModel);
                 string actualStateVar = needsState ? "state" : "null";
                 itemExpr = GetHelperMethodCall(context, helperName, $"source[{indexList}]", elementNeedsState, actualStateVar);
             }
             else if (context.TryGetImplicitTypeModel(member.ElementTypeName!, out TypeModel implicitModel))
             {
-                if (context.ShouldInline(implicitModel.FullyQualifiedName))
+                if (context.CanInline(implicitModel.FullyQualifiedName, implicitModel.IsStruct, needsState ? "state" : "null"))
                 {
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = MemberCloneGenerator.GetImplicitCloneExpression(context, implicitModel, $"source[{indexList}]", actualStateVar, "                ", true) + "!";

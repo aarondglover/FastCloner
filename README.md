@@ -309,15 +309,33 @@ what `FastDeepClone()` does for the type, and a type discovered through both pre
 simply gets the capability once — there is no "winning" surface. Types that already carry
 `[FastClonerClonable]` keep their single generated root and gain the capability in place.
 
+The explicit operation is the *strongest* identity requirement for that invocation. Member and type level
+`[FastClonerPreserveIdentity(false)]` are defaults for the ordinary call and do not weaken it:
+
+```cs
+[FastClonerClonable]
+public class Root
+{
+    [FastClonerPreserveIdentity(false)]
+    public List<Node> Nodes { get; set; } = [];
+}
+
+root.FastDeepClone();                                  // member default: no tracking for Nodes
+root.FastDeepClone(FastCloneOptions.PreserveIdentity); // Nodes[0] == Nodes[1]
+```
+
 A root exposes `FastDeepClone(FastCloneOptions)` when it can honor the request:
 a type discovered through a surface declaring `PreserveIdentity = true`, or a type that configures identity
 itself with `[FastClonerPreserveIdentity]`. Anywhere else the overload is not generated, so `FastDeepClone()`
 stays on its existing fast path and a caller cannot silently receive a clone that ignores the requirement.
 
 > **Note**: the generated capability covers everything the generated graph clones. Members that FastCloner
-> delegates to the runtime cloner (custom handlers, types the generator cannot model) use the runtime's own
-> tracking state, so an object shared between a generated path and a runtime-delegated path can still end up
-> cloned twice.
+> delegates to the runtime cloner (custom handlers, `object`-typed members, types the generator cannot model)
+> are cloned with the runtime's own tracking state, so an object shared between a generated path and a
+> runtime-delegated path can still end up cloned twice. That boundary is documented and pinned by a test rather
+> than advertised as guaranteed; see
+> [the design notes](docs/design/generic-argument-discovery.md#generatedruntime-boundary-reported-options-listed-not-fixed-here)
+> for the options to close it.
 
 ### Custom Cloning Context
 
@@ -499,10 +517,11 @@ Document shared = doc.FastDeepClone(FastCloneOptions.PreserveIdentity); // this 
 ```
 
 The option describes what *this* invocation requires; it never changes the type's configured default and no
-second clone implementation is generated. The overload exists for roots that declare the capability — a type
-with `[FastClonerPreserveIdentity]`, or a type discovered through
-`[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`. Elsewhere the call does not compile rather than
-quietly returning an untracked clone.
+second clone implementation is generated. It is also the strongest identity requirement for that call: member
+and type level `[FastClonerPreserveIdentity(false)]` values are defaults for the ordinary call and do not weaken
+it. The overload exists for roots that declare the capability — a type with `[FastClonerPreserveIdentity]`, or a
+type discovered through `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`. Elsewhere the call does
+not compile rather than quietly returning an untracked clone.
 
 ## Limitations
 

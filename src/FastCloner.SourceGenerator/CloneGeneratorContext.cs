@@ -107,6 +107,115 @@ internal sealed class CloneGeneratorContext
         return true;
     }
 
+    /// <summary>
+    /// Whether a member's helper takes a tracking state at all. This is the <em>shape</em> of the
+    /// generated helper and deliberately ignores member-level configuration: helper definitions are
+    /// shared, so shape decisions must not depend on which member happened to ask for them.
+    /// Whether the state is actually passed is decided per call site by
+    /// <see cref="GetMemberStateArgument"/>.
+    /// </summary>
+    public bool MemberCanTrack(MemberModel member)
+    {
+        // Members whose clone call always accepts a state - clonable members (their own generated
+        // file) and the runtime-bridge Cloner<T> used for everything else - can be handed this file's
+        // state even when this file itself is not state capable. Threading through such a file is
+        // what lets an explicit preserving operation reach across it, and it preserves the existing
+        // behavior. Nothing is threaded by default: the ordinary path starts from a null state.
+        if (MemberKindAlwaysAcceptsState(member))
+            return true;
+
+        return StateCapable && MemberKindSupportsTracking(member);
+    }
+
+    private static bool MemberKindAlwaysAcceptsState(MemberModel member)
+    {
+        switch (member.TypeKind)
+        {
+            case MemberTypeKind.Clonable:
+            case MemberTypeKind.Object:
+            case MemberTypeKind.Other:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether tracking applies to a member by default, i.e. without an explicit operation. This is
+    /// where member-level configuration lives, including a negative override.
+    /// </summary>
+    public bool MemberTracksByDefault(MemberModel member)
+    {
+        if (member.PreserveIdentity is not null)
+            return member.PreserveIdentity.Value;
+
+        return MemberCanTrack(member);
+    }
+
+    /// <summary>
+    /// The state expression to pass for a member. Member-level <c>[FastClonerPreserveIdentity(false)]</c>
+    /// suppresses tracking for ordinary calls, but an explicit
+    /// <c>FastCloneOptions.PreserveIdentity</c> operation is the strongest requirement for that
+    /// invocation: the state is threaded whenever it belongs to such an operation, whatever the
+    /// member configuration says.
+    /// </summary>
+    public string GetMemberStateArgument(MemberModel member, string stateVar)
+    {
+        if (MemberTracksByDefault(member))
+            return stateVar;
+
+        // Nothing to force when the enclosing body has no state in scope.
+        if (!MemberCanTrack(member) || stateVar == "null")
+            return "null";
+
+        return PreservingOperationState(stateVar);
+    }
+
+    /// <summary>
+    /// Expression that yields the state only when it belongs to an explicit preserving operation.
+    /// </summary>
+    public static string PreservingOperationState(string stateVar)
+    {
+        return $"{stateVar} is {{ IsPreservingOperation: true }} ? {stateVar} : null";
+    }
+
+    /// <summary>
+    /// Whether an implicit clone can be inlined. Inlining copies members without registering the
+    /// clone in the tracking state, so a state capable file must not inline reference-typed
+    /// implicit clones: an explicit preserving operation has to see them.
+    /// </summary>
+    public bool CanInline(string typeFullName, bool isValueType, string stateVar)
+    {
+        // Inlining copies members without registering the clone in the tracking state, so it is only
+        // valid when no state is in scope (the ordinary fast path) or when the file cannot track at
+        // all. Structs have no identity to register.
+        return ShouldInline(typeFullName) && (isValueType || !StateCapable || stateVar == "null");
+    }
+
+    private static bool MemberKindSupportsTracking(MemberModel member)
+    {
+        switch (member.TypeKind)
+        {
+            case MemberTypeKind.Safe:
+                return false;
+            case MemberTypeKind.Clonable:
+                return true;
+            case MemberTypeKind.Collection:
+            case MemberTypeKind.Array:
+            case MemberTypeKind.MultiDimArray:
+            {
+                // Elements that are safe values carry no identity to preserve.
+                if (member.ElementIsSafe)
+                    return false;
+                if (member.ElementHasClonableAttr)
+                    return true;
+                break;
+            }
+        }
+
+        return true;
+    }
+
     public string DequeuePendingHelperMethod() => _pendingHelperMethods.Dequeue();
 
     public bool TryGetImplicitTypeModel(string typeName, out TypeModel model)
