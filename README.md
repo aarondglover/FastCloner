@@ -237,6 +237,67 @@ public abstract class Plugin
 }
 ```
 
+### Generic Argument Discovery Points
+
+`[FastClonerInclude]` needs a clonable host type to hang off. When the generic API surface that carries your
+types is not itself something you want to clone — an interface, a delegate, a generic method, or a type you
+only use as a boundary — mark the surface itself:
+
+```cs
+[FastClonerDiscoverGenericArguments]
+public interface IContainer<T>
+{
+}
+
+// Closed usage: the generator treats Order as a clone root
+IContainer<Order> container = CreateContainer();
+Order clone = order.FastDeepClone();
+```
+
+Any closed usage of a marked surface feeds its closed generic arguments into the source generator as clone
+roots, so the argument types need no FastCloner attributes of their own. The attribute can be applied to
+generic classes, structs, records, interfaces, delegates and methods — including methods declared on a generic
+containing type (both the method's and the containing type's closed arguments are discovered). A marked
+declaration in a referenced assembly works the same way: the closed usage in the consuming compilation is what
+matters.
+
+```cs
+[FastClonerDiscoverGenericArguments]
+public delegate TResult Processor<TSource, TResult>(TSource source);
+
+public static class Operations
+{
+    [FastClonerDiscoverGenericArguments]
+    public static void Execute<T1, T2, T3>() { }
+}
+
+Processor<Customer, CustomerSnapshot> processor = CreateProcessor();
+Operations.Execute<Request, Response, Context>();
+// Customer, CustomerSnapshot, Request, Response and Context are now clone roots
+```
+
+Notes:
+
+- Open generic arguments (`IContainer<T>` inside a generic declaration) produce no roots.
+- Constructed generics and collections are descended, because a root needs a closed, non-generic signature:
+  `IContainer<List<Order>>` and `IContainer<Wrapper<Order>>` discover `Order`.
+- Types that report no cloneable state (safe types, delegates, `Lazy`/`Task`-style "do not clone" types) are
+  ignored, and a type that already carries `[FastClonerClonable]` keeps its own generated entry point.
+- Only explicit closed generic syntax is observed: generic *method* type arguments must be written out
+  (`Execute<Request, Response>()`), not left to inference.
+
+Add `PreserveIdentity = true` to give the roots discovered through that surface `[FastClonerPreserveIdentity]`
+semantics:
+
+```cs
+[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+public interface IGraph<T>
+{
+}
+
+// clone.Target1 == clone.Target2 whenever source.Target1 == source.Target2
+```
+
 ### Custom Cloning Context
 
 For advanced scenarios, create a custom cloning context to explicitly register types you want to clone. This is useful when you need a centralized cloning entry point or want to clone types from external assemblies:

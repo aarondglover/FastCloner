@@ -425,4 +425,55 @@ public class IdentityPreservationTests
     }
     
     #endregion
+    
+    #region Test 10: PreserveIdentity with implicitly cloned (unannotated) member types
+    
+    /// <summary>
+    /// Member types without [FastClonerClonable] are cloned through implicit helpers. A leaf whose
+    /// members are all safe types needs no cycle state of its own, so it used to be cloned once per
+    /// reference even when the root asked for identity preservation — while the runtime cloner
+    /// preserved the shared reference. Honoring the attribute requires the implicit model to keep a
+    /// state slot too.
+    /// </summary>
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity]
+    public class ImplicitLeafRoot
+    {
+        public string Name { get; set; } = "";
+        public ImplicitLeafNode Item1 { get; set; } = new();
+        public ImplicitLeafNode Item2 { get; set; } = new();
+    }
+    
+    public class ImplicitLeafNode
+    {
+        public int Id { get; set; }
+    }
+    
+    [Test]
+    public async Task ImplicitMemberTypes_PreserveSharedIdentity_MatchingTheRuntimeCloner()
+    {
+        ImplicitLeafNode shared = new ImplicitLeafNode { Id = 42 };
+        ImplicitLeafRoot original = new ImplicitLeafRoot
+        {
+            Name = "Test",
+            Item1 = shared,
+            Item2 = shared
+        };
+        
+        await Assert.That(original.Item1).IsSameReferenceAs(original.Item2);
+        
+        ImplicitLeafRoot clone = original.FastDeepClone();
+        
+        await Assert.That(clone.Item1).IsNotSameReferenceAs(original.Item1);
+        await Assert.That(clone.Item1).IsSameReferenceAs(clone.Item2)
+            .Because("shared references inside the subgraph must stay shared when identity preservation is requested");
+        await Assert.That(clone.Item1.Id).IsEqualTo(42);
+        
+        // The generated path must agree with the runtime cloner for the same graph.
+        ImplicitLeafRoot runtimeClone = original.DeepClone();
+        await Assert.That(runtimeClone.Item1).IsSameReferenceAs(runtimeClone.Item2)
+            .Because("the runtime cloner preserves identity for this graph, so the generated path has to as well");
+    }
+    
+    #endregion
 }

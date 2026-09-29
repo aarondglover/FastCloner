@@ -211,3 +211,69 @@ Tests should cover at least:
 - `PreserveIdentity = true` preserving shared-reference topology;
 - default discovery retaining existing identity behavior;
 - referenced-assembly declarations acting as discovery points from a consuming compilation.
+
+## Implementation notes
+
+Recorded while implementing the feature; they clarify (without changing) the agreed design.
+
+### Attribute shape
+
+`PreserveIdentity` is declared as `{ get; set; }` rather than `{ get; init; }`. The shared attribute assembly
+targets `netstandard2.0` and ships no `IsExternalInit` polyfill, and the sibling
+`FastClonerPreserveIdentityAttribute.Enabled` uses `{ get; set; }`; named-argument usage
+(`[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`) is identical either way.
+
+### Discovery is driven from the usage site
+
+The generator resolves discovery points from closed generic *usage* syntax (the same
+`CreateSyntaxProvider` + `GenericNameSyntax` shape `GenericUsageCollector` and `SubtypeUsageCollector` use) and
+inspects the referenced declaration's attributes there. An `ForAttributeWithMetadataName` pipeline over the
+attribute would only ever see declarations in the current compilation, so it could not satisfy the
+referenced-assembly requirement. A marked declaration is only a discovery point once observed in a closed form,
+which is exactly the requested behavior.
+
+A generic *type* is also a discovery surface when it declares a marked method, which is what makes a closed
+`IStage<Form>` usage expose `Form` in the design's `IStage<T>` example. For a marked method, both the method's
+own closed arguments and the closed arguments of its containing type are collected.
+
+### Which arguments become roots
+
+A generated entry point is a closed, non-generic `FastDeepClone(this T)` extension, so a root must be a closed,
+non-generic type. Consequences, in the order the collector applies them:
+
+- open/unbound arguments (`IContainer<T>`, `typeof(IContainer<>)`) are ignored;
+- safe types and "do not clone" types (delegates, `Lazy`/`Task`-style types) report no cloneable state and are
+  ignored;
+- `object` is ignored explicitly: an extension method on `object` would apply to every receiver and silently
+  shallow-copy anything FastCloner has no cloner for;
+- constructed generic arguments and collection/dictionary/array arguments are descended instead of rooted, which
+  is what exposes `Order` for `IContainer<List<Order>>` and `IContainer<Wrapper<Order>>`. Constructed generic
+  ARGUMENTS cannot be roots themselves because a closed construction keeps the definition's type parameters
+  (`Wrapper<Order>` still reports `T`), so an entry point generated for it would declare an unusable type
+  parameter at every call site;
+- a type that already carries `[FastClonerClonable]` is skipped: its own pipeline already emitted the entry
+  point, and a second one would be a duplicate member of the same extension class;
+- types declared in another assembly are rooted only when the generator would already clone them implicitly
+  (public parameterless constructor). Emitting member-wise cloners for arbitrary foreign types (e.g. `HttpClient`)
+  would depend on state the generator cannot access, and would turn an innocuous usage into a build break.
+
+Roots are deduplicated by fully qualified name; when the same type is reached through several surfaces, the
+identity-preserving model wins because identity is a property of the discovered type rather than of whichever
+surface discovered it first.
+
+### Identity preservation
+
+`PreserveIdentity = true` feeds `true` through `TypeModelFactory`/`StateRequirementAnalyzer`, i.e. exactly the
+`[FastClonerPreserveIdentity]` path. One gap surfaced: an implicitly cloned member type whose own members are all
+safe types kept `NeedsStateTracking = false`, so it was cloned once per reference and shared identity was lost —
+while the runtime cloner preserved it. Since identity preservation is useless without that, the implicit models
+of a preserving root now get a state slot (`TypeModelFactory.PromoteIdentityTracking`). The change is inert
+unless the root asks for identity preservation, and it closes a generated/runtime behavioral difference.
+
+### Known boundaries
+
+- Discovery observes closed generic *syntax*. Generic method type arguments that are left to inference
+  (`Operations.Execute()` with nothing written out) are not observed; the type-argument form is.
+- Types that are already `[FastClonerClonable]` keep their own generated entry point; `PreserveIdentity` declared
+  on a discovery surface does not override a root that already exists through its own attribute.
+

@@ -135,6 +135,23 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         IncrementalValuesProvider<(((Result<TypeModel> Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> combinedPipeline =
             pipeline.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
 
+        // Discovery pipeline: closed usages of [FastClonerDiscoverGenericArguments] API surfaces
+        // contribute additional clone roots. Driven from usage syntax rather than from the
+        // attribute so that a marked declaration living in a referenced assembly still acts as a
+        // discovery point for this compilation.
+        IncrementalValuesProvider<DiscoveredGenericRoot> discoveredRoots = context.SyntaxProvider.CreateSyntaxProvider(
+            predicate: GenericArgumentDiscoveryCollector.IsCandidate,
+            transform: static (ctx, _) => ctx)
+            .Combine(targetFrameworkProvider)
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, cancellationToken) => GenericArgumentDiscoveryCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
+            .Where(static x => x.Count > 0)
+            .Collect()
+            .SelectMany(static (lists, _) => GenericArgumentDiscoveryCollector.Merge(lists));
+
+        IncrementalValuesProvider<(((DiscoveredGenericRoot Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> discoveryPipeline =
+            discoveredRoots.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
+
         // OPTIMAL PERFORMANCE: No Compilation combine!
         // All type analysis is pre-computed in TypeModel during the transform step.
         // This ensures the generator only re-runs when decorated types actually change,
@@ -142,103 +159,24 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         context.RegisterSourceOutput(combinedPipeline, static (ctx, source) =>
         {
             var (((result, usages), subtypeUsages), contract) = source;
-            
+
             result.Handle(
-                model =>
-                {
-                    try
-                    {
-                        // Check for silent failure cases where FastCloner runtime is missing
-                        // We only warn here because generating broken code is sometimes better than nothing (e.g. partial clone),
-                        // but ideally the user should install FastCloner or fix the type.
-                        if (!model.IsFastClonerAvailable)
-                        {
-                            bool hasInitOnlyWithCycles = model.NeedsStateTracking && model.Members.Any(m => m.IsInitOnly);
-                            bool structWithReadonlyRefs = model.IsStruct && model.Members.Any(m => m is { IsValueType: false, IsReadOnly: true });
-                            
-                            if (hasInitOnlyWithCycles)
-                            {
-                                ctx.ReportDiagnostic(Diagnostic.Create(
-                                    new DiagnosticDescriptor(
-                                        "FCG005",
-                                        "Init-only properties skipped",
-                                        "Type '{0}' has init-only properties and requires circular reference tracking, but FastCloner runtime is not available. Init-only properties will not be cloned.",
-                                        "FastCloner",
-                                        DiagnosticSeverity.Warning,
-                                        isEnabledByDefault: true),
-                                    Location.None,
-                                    model.Name));
-                            }
-                            
-                            if (structWithReadonlyRefs)
-                            {
-                                ctx.ReportDiagnostic(Diagnostic.Create(
-                                    new DiagnosticDescriptor(
-                                        "FCG006",
-                                        "Readonly reference fields in struct skipped",
-                                        "Struct '{0}' has readonly reference fields, but FastCloner runtime is not available. These fields will be shallow-copied.",
-                                        "FastCloner",
-                                        DiagnosticSeverity.Warning,
-                                        isEnabledByDefault: true),
-                                    Location.None,
-                                    model.Name));
-                            }
-                        }
+                model => CloneRootEmitter.Emit(ctx, model, usages, subtypeUsages, contract),
+                error => ctx.ReportDiagnostic(error));
+        });
 
-                        CloneCodeGenerator generator = new CloneCodeGenerator(model, usages, subtypeUsages, contract);
-                        string generatedSource = generator.Generate();
+        context.RegisterSourceOutput(discoveryPipeline, static (ctx, source) =>
+        {
+            var (((root, usages), subtypeUsages), contract) = source;
 
-                        if (generator.SkippedNonPublicMembers.Count > 0)
-                        {
-                            string skippedList = string.Join(", ", generator.SkippedNonPublicMembers);
-                            ctx.ReportDiagnostic(Diagnostic.Create(
-                                new DiagnosticDescriptor(
-                                    "FCG010",
-                                    "Non-public members skipped by source generator",
-                                    "Type '{0}' has non-public members ({1}) that the source generator cannot clone on this target framework. " +
-                                    "Either upgrade the consumer to .NET 8+, or install the FastCloner runtime package, " +
-                                    "or apply [FastClonerVisibility] / [FastClonerIgnore] to opt out explicitly.",
-                                    "FastCloner",
-                                    DiagnosticSeverity.Warning,
-                                    isEnabledByDefault: true),
-                                Location.None,
-                                model.Name,
-                                skippedList));
-                        }
-
-                        // Use FullyQualifiedName to avoid collisions when same class name exists in different namespaces
-                        string safeName = model.FullyQualifiedName
-                            .Replace("global::", "")
-                            .Replace(".", "_")
-                            .Replace("<", "_")
-                            .Replace(">", "_")
-                            .Replace(" ", "")
-                            .Replace(",", "_")
-                            .Replace(":", "_")
-                            .Replace("?", "_");
-
-                        ctx.AddSource($"{safeName}_FastDeepClone.g.cs", SourceText.From(generatedSource, Encoding.UTF8));
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Location location = Location.None;
-                        ctx.ReportDiagnostic(
-                            Diagnostic.Create(
-                                new DiagnosticDescriptor(
-                                    "FCG001",
-                                    "Generator Error",
-                                    "Error generating clone code: {0}",
-                                    "FastCloner",
-                                    DiagnosticSeverity.Error,
-                                    isEnabledByDefault: true),
-                                location,
-                                ex.ToString()));
-                    }
-                },
-                error =>
-                {
-                    ctx.ReportDiagnostic(error);
-                });
+            if (root.Model != null)
+            {
+                CloneRootEmitter.Emit(ctx, root.Model, usages, subtypeUsages, contract);
+            }
+            else if (root.Failure != null)
+            {
+                ctx.ReportDiagnostic(root.Failure);
+            }
         });
 
         // FastClonerContext Pipeline
