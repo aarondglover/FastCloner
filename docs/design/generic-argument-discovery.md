@@ -157,10 +157,10 @@ value.FastDeepClone(FastCloneOptions.PreserveIdentity);  // A' ──► B' ◄�
 The explicit request is the strongest identity requirement for that invocation: member and type level
 `PreserveIdentity(false)` are defaults for the ordinary call and do not weaken it.
 
-See the implementation notes below for the capability model, and for the pre-existing limitations the guarantee
-inherits from the existing machinery (a member-level negative override against a child type whose own default is
-preserving, and members delegated to the runtime cloner — for which the smallest viable options are listed rather
-than silently advertising a guarantee the generator knows it may not be able to keep).
+See the implementation notes below for the capability model, for the boundary the generator repairs and the
+boundary it reports instead of advertising (a preserving operation is only offered where the generated graph can
+actually carry it), and for the pre-existing member-level negative-override limitation against a child type whose
+own default is preserving, which stays a separate issue.
 
 ## Proposed attribute surface
 
@@ -230,7 +230,11 @@ Tests should cover at least:
 - open generic arguments being ignored;
 - `PreserveIdentity = true` preserving shared-reference topology;
 - default discovery retaining existing identity behavior;
-- referenced-assembly declarations acting as discovery points from a consuming compilation.
+- referenced-assembly declarations acting as discovery points from a consuming compilation;
+- the generated-to-generated state transitions (non-public members, `Cloner<T>` for an included clonable argument,
+  a collection of the root's own type parameter) keeping one tracking state;
+- a requirement that cannot be served being reported (`FCG013`) with the operation-level entry point withheld, and
+  a graph that can be served exposing it with no runtime-cloner escape path.
 
 ## Implementation notes
 
@@ -317,8 +321,22 @@ operation-level request: `value.FastDeepClone(FastCloneOptions.PreserveIdentity)
 The generated overload delegates to the existing entry point when the option is absent and to
 `InternalFastDeepClone(source, new FcGeneratedCloneState(preservingOperation: true))` when it is present, making the
 request the strongest requirement for that invocation: topology is preserved whether the type's default preserves or
-not. Only capable roots expose the overload, so the guarantee cannot be requested where it cannot be honored — the
-call does not compile instead of silently returning an untracked clone.
+not.
+
+The overload is emitted **only when the generated graph proves it can carry one tracking state across everything it
+deep clones**. Two things can withhold it:
+
+- a part of the graph that necessarily delegates to the runtime cloner (see *Generated/runtime boundary* below), or
+- the root not being state capable at all.
+
+So the contract is unconditional for every surface on which the call compiles:
+
+> `value.FastDeepClone(FastCloneOptions.PreserveIdentity)` preserves reference topology across everything that
+> operation actually deep clones.
+
+A caller cannot obtain a clone that ignores the requirement: where the guarantee cannot be met the call does not
+compile, and — for a requirement or a configured identity — the generator says why instead of leaving it to
+guesswork (`FCG013`, `FCG014`).
 
 The state carries `FcGeneratedCloneState.IsPreservingOperation` so the *shape* decision (does a helper take a state
 at all?) stays separable from the *call-site* decision (is the state handed over?). `state != null` alone is not
@@ -347,19 +365,33 @@ root.FastDeepClone(FastCloneOptions.PreserveIdentity); // explicit: tracked, Nod
 
 Whether a state can be handed to a member is a *shape* question (`CloneGeneratorContext.MemberCanTrack`) and whether
 it is handed over by default is a *configuration* question (`MemberTracksByDefault`). Members whose clone call
-always accepts a state — `Clonable` members (their own generated file) and the runtime-bridge `Cloner<T>` used for
-everything else — take the state whenever one is in scope, even when the enclosing file is not itself state capable.
-That threading is what lets a preserving operation cross a file the generator did not have to make capable, and it is
-exactly the threading the committed generator already performed, so no previously shared reference stops being
-shared. Collection/dictionary/array/implicit helpers generated *in the same file* can only carry the state when the
-file is capable, since their signatures are emitted here.
+always accepts a state — `Clonable` members (their own generated file) and the generated `Cloner<T>` helper — take
+the state whenever one is in scope, even when the enclosing file is not itself state capable. That threading is what
+lets a preserving operation cross a file the generator did not have to make capable, and it is exactly the threading
+the committed generator already performed, so no previously shared reference stops being shared.
+Collection/dictionary/array/implicit helpers generated *in the same file* can only carry the state when the file is
+capable, since their signatures are emitted here.
+
+Three generated-to-generated transitions were repaired so the state is never dropped on the way:
+
+- the `Cloner<T>` branch for a `[FastClonerInclude]` argument that is `IsClonable` and declared in this
+  compilation now calls that root's `InternalFastDeepClone(source, state)` instead of its state-free public entry
+  point;
+- a non-public member (`UnsafeAccessor` path) is cloned by this file's generated helper for collection, dictionary,
+  array and implicit member types, instead of always going to the runtime cloner;
+- an element/key/value that is the root's own type parameter is cloned through the generated `Cloner<T>` helper
+  (which carries the `[FastClonerInclude]` dispatch and its state) instead of straight to the runtime cloner.
+
+A clonable argument dispatched through `Cloner<T>` is also part of the capability closure
+(`IdentityCapabilityRequirements`), because the helper hands the state straight to that argument's own file.
 
 ### Capability propagation across generated files
 
 A requirement does not stop at a file boundary: `IdentityCapabilityRequirements.Expand` walks each capable root's
-generated graph (clonable members, clonable collection elements and dictionary keys/values, derived types) and
-ORs the capability into every type the graph clones through another generated file. Without the closure, a
-preserving operation would reach a member's own file and find a root that never declared itself capable.
+generated graph (clonable members, clonable collection elements and dictionary keys/values, `Cloner<T>`-dispatched
+clonable arguments, derived types) and ORs the capability into every type the graph clones through another generated
+file. Without the closure, a preserving operation would reach a member's own file and find a root that never declared
+itself capable.
 
 The closure only adds the *capability* (helpers gain a state parameter they ignore when handed `null`), so files
 that do not take part in any identity requirement are emitted byte-identically to before — verified by diffing the
@@ -381,43 +413,68 @@ If the discovered type is already `[FastClonerClonable]`, discovery does not ski
 emit a second root: the requirement is carried as an FQN-keyed requirement and OR-ed into the model produced by
 the clonable pipeline before code generation.
 
-### Generated/runtime boundary (reported, options listed, not fixed here)
+### Generated/runtime boundary
 
-An explicit preserving operation can only be honored where the graph is cloned by the generated implementation.
-These generated paths hand a part of the graph to the runtime cloner, which creates its **own** `FastCloneState`;
-the generated `FcGeneratedCloneState` cannot be shared with it today:
+The runtime cloner always creates its **own** `FastCloneState`, and the generated `FcGeneratedCloneState` cannot be
+shared with it. Every generated path that used to hand a part of the graph to it has been inventoried, repaired
+where the target is statically knowable, or reported where it is not.
 
-1. `Cloner<T>.Clone(source, state)` — the member kinds `Object`/`Other`/default. The generated (file-private)
-   `Cloner<T>` accepts a state but its fallthrough calls `FastCloner.DeepClone(source)` and drops it. Reproduced by
-   `FastCloneOptionsTests.ObjectTypedMember_IsDelegatedToTheRuntimeCloner_WhichRunsItsOwnState` (`object`-typed
-   members).
-2. `CloneGeneratorContext.FastClonerDeepCloneCall` fallbacks: a collection/dictionary/array element type the
-   generator has no model for, and `NonPublicAccessorEmitter.ProduceClonedExpression`'s default arm. The nested
-   element case is now largely removed by the leaf modelling described above; the non-public default arm remains.
-3. `Cloner<T>` branches for `[FastClonerInclude]`-dispatched generic arguments that are `IsClonable`
-   (`CloneCodeGenerator.WriteClonerClass` calls the *ordinary* `FastDeepClone`, so the state is dropped even though
-   the callee is a generated root). This one is fixable inside the generator.
-4. The TFM-below-`net8` non-public accessor runtime bridge (`BridgeProxyEmitter` proxy `DeepCloneField`/
-   `DeepCloneProperty`).
+Repaired (a preserving operation no longer drops the state merely by crossing generated code):
 
-A capability-enabled root can detect all four at generation time (member kind, resolved element/key/value models,
-the `Cloner<T>` usage list, and the bridge contract are all available), so the guarantee does not have to stay
-silent best-effort. The smallest viable options, in increasing cost:
+1. `Cloner<T>` for a `[FastClonerInclude]` argument that is `IsClonable` **and declared in this compilation** — the
+   helper now calls that root's `InternalFastDeepClone(source, state)`. Arguments from a *referenced* assembly keep
+   using the public entry point, because their generated `InternalFastDeepClone` is internal; that case is a
+   boundary.
+2. Collection/dictionary/array element, key and value types that are the **root's own type parameter** — cloned
+   through the generated `Cloner<T>` (which carries the `[FastClonerInclude]` dispatch and the supplied state)
+   instead of straight to the runtime cloner.
+3. Non-public members on the `UnsafeAccessor` path (`net8+`) — cloned by this file's generated helper for
+   collection/dictionary/array/implicit member types. Previously every non-public member except `Safe`/`Clonable`
+   went to the runtime cloner.
+4. Element/key/value types nested below a collection (`List<List<Node>>`) — now modelled for state-capable roots
+   (see above), so the innermost element no longer falls back.
 
-- **(a) Diagnostic.** When a capable root's graph contains one of these delegations, report a warning naming the
-  member, and keep the XML remark on the generated overload honest. No runtime change; the cost is noise on graphs
-  the caller may never request preservation for.
-- **(b) Fix the generator-side cases first.** (3), and any remaining (2) that could be modelled, are fixable without
-  a runtime change; (1) cannot be, because an `object`-typed (or custom-handler) member has no knowable target type
-  at generation time.
-- **(c) Bridge the state.** Let `FcGeneratedCloneState` hold/produce the runtime `FastCloneState` and add an
-  internal state-accepting entry point to the runtime cloner, then have `Cloner<T>` and the non-public bridge pass
-  it. This is the only option that makes (1) a hard guarantee, and it is a runtime + shared-assembly change, so it
-  is deliberately not part of this change.
+Inherently resolved at runtime (cannot be repaired without a runtime-state bridge, because the target type is not
+knowable at generation time):
 
-Until one of these is implemented, the requirement is documented as "capable roots must be able to satisfy an
-explicit identity-preserving operation for the part of the graph they clone themselves", the generated overload
-says so in its `remarks`, and the boundary is pinned by a characterization test rather than hidden.
+- `Cloner<T>.Clone` fallthrough, i.e. members of kind `Object`/`Other` (an `object`-typed member, a type the
+  generator could not model) and any closed `[FastClonerInclude]` argument that matches no dispatch branch;
+- collection/dictionary/array element/key/value with no generated model (an interface or abstract type without
+  dispatch, a type without a usable constructor, a `T` in a root with more than one type parameter);
+- the unknown-derived-type fallback for abstract and polymorphic roots;
+- the whole-root fallback for init-only members combined with circular tracking, and readonly reference fields in a
+  struct (the entire type is cloned by the runtime cloner, with a comment saying the state is ignored);
+- the TFM-below-`net8` non-public accessor bridge (`BridgeProxyEmitter` proxy `DeepCloneField`/`DeepCloneProperty`).
+
+All of them are detected while the file is generated — the same analysis that emits the code records the reason —
+which gives two guarantees:
+
+- **The operation is withheld.** The options overload is only emitted when no boundary was recorded, so a supported
+  preserving operation has no known generated-state escape path.
+- **The requirement is reported.** A root that must support the operation gets a diagnostic instead of a silent
+  best-effort implementation:
+
+  | ID | Severity | Raised when |
+  |----|----------|-------------|
+  | `FCG013` | Error | a `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]` requirement cannot be supplied for a type, because its graph necessarily delegates to the runtime cloner |
+  | `FCG014` | Warning | a type that configures identity itself (`[FastClonerPreserveIdentity]` on the type or a member) has the same boundary; the runtime fallback for that member is pre-existing behavior, so this is reported rather than broken |
+
+  Roots that never requested identity preservation (including roots that only track state for circular references)
+  get neither diagnostic and keep their existing generated output.
+
+### Future option: bridging the runtime state
+
+`FCG013`/`FCG014` make the contract honest without a runtime change, but they cannot make an `object`-typed or
+custom-handler subgraph participate. Closing that would need, roughly:
+
+- `FcGeneratedCloneState` able to expose (or be built around) the runtime `FastCloneState`'s known-reference map;
+- an internal runtime entry point that accepts that map (`FastCloner.DeepClone(source, state)` in one form or
+  another) so the cloner can register into and read from the same identity map;
+- the generated `Cloner<T>` fallthrough and the non-public accessor bridge passing the state through it.
+
+That is a runtime + shared-assembly change and is deliberately **not** part of this issue. It should be driven by a
+concrete consumer graph (for example a real `Form` graph from Supervisor) that actually crosses one of the
+boundaries above.
 
 ### Confirmed pre-existing limitations (reported, not fixed here)
 

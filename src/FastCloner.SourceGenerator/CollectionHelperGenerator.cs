@@ -448,9 +448,32 @@ internal static class CollectionHelperGenerator
             return GetHelperMethodCall(context, helperName, itemVar, elementNeedsState, actualStateVar);
         }
 
-        return context.IsFastClonerAvailable ?
-            $"({member.ElementTypeName}){CloneGeneratorContext.FastClonerDeepCloneCall(itemVar)}!" :
-            itemVar;
+        if (context.IsFastClonerAvailable)
+        {
+            return GetUnmodelledCloneExpression(context, member.ElementTypeName, itemVar, parentNeedsState ? "state" : "null");
+        }
+
+        return itemVar;
+    }
+
+    /// <summary>
+    /// Expression for an element/key/value type that has no generated model of its own. When the type
+    /// is the root's single type parameter the generated <c>Cloner&lt;T&gt;</c> helper still applies,
+    /// and it threads the supplied state into the closed arguments discovered through
+    /// <c>[FastClonerInclude]</c>. Anything else is resolved at runtime, so it is recorded as a
+    /// boundary that prevents a graph-wide identity-preserving operation.
+    /// </summary>
+    internal static string GetUnmodelledCloneExpression(CloneGeneratorContext context, string? typeName, string expression, string stateVar)
+    {
+        if (typeName != null && context.Model.IsSoleTypeParameter(typeName))
+        {
+            context.NeedsClonerClass = true;
+            return $"Cloner<{typeName}>.Clone({expression}, {stateVar})!";
+        }
+
+        context.RecordRuntimeBoundary(
+            $"'{typeName ?? "an element"}' has no generated model, so it is cloned by the runtime cloner with its own state");
+        return $"({typeName}){CloneGeneratorContext.FastClonerDeepCloneCall(expression)}!";
     }
 
     private static void WriteDictionaryCloneMethod(CloneGeneratorContext context, MemberModel member)
@@ -694,7 +717,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.IsFastClonerAvailable)
             {
-                keyExpr = $"({member.KeyTypeName}){CloneGeneratorContext.FastClonerDeepCloneCall("kvp.Key")}!";
+                keyExpr = GetUnmodelledCloneExpression(context, member.KeyTypeName, "kvp.Key", needsState ? "state" : "null");
             }
         }
 
@@ -730,7 +753,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.IsFastClonerAvailable)
             {
-                valExpr = $"({member.ValueTypeName}){CloneGeneratorContext.FastClonerDeepCloneCall("kvp.Value")}!";
+                valExpr = GetUnmodelledCloneExpression(context, member.ValueTypeName, "kvp.Value", needsState ? "state" : "null");
             }
         }
         
@@ -817,7 +840,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.IsFastClonerAvailable)
             {
-                itemExpr = $"({member.ElementTypeName}){CloneGeneratorContext.FastClonerDeepCloneCall("source[i]")}!";
+                itemExpr = GetUnmodelledCloneExpression(context, member.ElementTypeName, "source[i]", needsState ? "state" : "null");
             }
             else
             {
@@ -927,7 +950,7 @@ internal static class CollectionHelperGenerator
             }
             else if (context.IsFastClonerAvailable)
             {
-                itemExpr = $"({member.ElementTypeName}){CloneGeneratorContext.FastClonerDeepCloneCall($"source[{indexList}]")}!";
+                itemExpr = GetUnmodelledCloneExpression(context, member.ElementTypeName, $"source[{indexList}]", needsState ? "state" : "null");
             }
             else
             {
@@ -999,7 +1022,7 @@ internal static class CollectionHelperGenerator
         }
     }
 
-    private static string GetHelperMethodCall(CloneGeneratorContext context, string methodName, string sourceExpression, bool needsState, string stateVar = "null")
+    internal static string GetHelperMethodCall(CloneGeneratorContext context, string methodName, string sourceExpression, bool needsState, string stateVar = "null")
     {
         string typeParams = GetTypeParametersString(context.Model);
 
@@ -1011,7 +1034,7 @@ internal static class CollectionHelperGenerator
         return $"{methodName}{typeParams}({sourceExpression})!";
     }
 
-    private static string GetTypeParametersString(TypeModel model)
+    internal static string GetTypeParametersString(TypeModel model)
     {
         return model.TypeParameters.Count == 0 ? string.Empty : $"<{string.Join(", ", model.TypeParameters)}>";
     }

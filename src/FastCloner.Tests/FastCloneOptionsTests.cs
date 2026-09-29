@@ -296,25 +296,24 @@ public class FastCloneOptionsTests
     }
 
     /// <summary>
-    /// Characterizes the boundary the generator cannot currently close: a member the generator has no
-    /// model for (<c>object</c> here) is handed to the runtime cloner, which runs its own tracking
-    /// state. The generated state therefore stops at that member, so the identity guarantee of an
-    /// explicit preserving operation is best effort from there on. Reported rather than silently
-    /// advertised — see <c>docs/design/generic-argument-discovery.md</c>.
+    /// An <c>object</c>-typed member is resolved at runtime, so the generator cannot prove that one
+    /// tracking state covers the whole graph. Rather than promising a guarantee it cannot keep, it
+    /// withholds the operation-level entry point (and reports a warning explaining why). The ordinary
+    /// entry point keeps its existing, best-effort behavior.
     /// </summary>
     [Test]
-    public async Task ObjectTypedMember_IsDelegatedToTheRuntimeCloner_WhichRunsItsOwnState()
+    public async Task ObjectTypedMember_ShouldWithholdThePreservingOperation()
     {
+        await Assert.That(HasOptionsOverload("FastCloner.Tests.FastCloneOptionsTests.ObjectMemberRootFastDeepCloneExtensions")).IsFalse()
+            .Because("an object-typed member is handed to the runtime cloner, which runs its own tracking state");
+
         OptionNode shared = new() { Value = 11 };
         ObjectMemberRoot original = new() { First = shared, Second = shared };
 
         ObjectMemberRoot ordinary = original.FastDeepClone();
-        await Assert.That(ordinary.First).IsNotSameReferenceAs(ordinary.Second);
-
-        ObjectMemberRoot preserving = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
-        await Assert.That(preserving.First).IsNotSameReferenceAs(preserving.Second)
-            .Because("the runtime cloner is entered with its own state, so the generated guarantee stops at that boundary");
-        await Assert.That(((OptionNode)preserving.First!).Value).IsEqualTo(11);
+        await Assert.That(ordinary.First).IsNotSameReferenceAs(ordinary.Second)
+            .Because("the default fast path is unchanged");
+        await Assert.That(((OptionNode)ordinary.First!).Value).IsEqualTo(11);
     }
 
     #endregion

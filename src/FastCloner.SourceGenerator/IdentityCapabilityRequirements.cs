@@ -6,6 +6,19 @@ using System.Linq;
 namespace FastCloner.SourceGenerator;
 
 /// <summary>
+/// The outcome of expanding identity requirements over the generated graph.
+/// <br/><br/>
+/// <paramref name="Capability"/> names every type that must be able to honor a supplied tracking
+/// state, and <paramref name="Required"/> every type for which that state is a <em>hard</em>
+/// requirement coming from a <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c>
+/// surface. The two differ: a type can be capable without anyone requiring the operation, but a
+/// required type must be able to serve it or say why not.
+/// </summary>
+internal readonly record struct IdentityRequirementSet(
+    EquatableArray<string> Capability,
+    EquatableArray<string> Required);
+
+/// <summary>
 /// Expands identity-preservation capability requirements over the generated graph.
 /// <br/><br/>
 /// Capability is what lets one generated file honor a tracking state supplied by another. A type
@@ -16,9 +29,10 @@ namespace FastCloner.SourceGenerator;
 /// </summary>
 internal static class IdentityCapabilityRequirements
 {
-    public static EquatableArray<string> Expand(
+    public static IdentityRequirementSet Expand(
         ImmutableArray<Result<TypeModel>> models,
-        GenericArgumentDiscoveryResult discovery)
+        GenericArgumentDiscoveryResult discovery,
+        EquatableArray<GenericUsage> usages)
     {
         Dictionary<string, TypeModel> byFqn = new(StringComparer.Ordinal);
 
@@ -34,42 +48,80 @@ internal static class IdentityCapabilityRequirements
                 byFqn[model.FullyQualifiedName] = model;
         }
 
+        HashSet<string> capability = new(StringComparer.Ordinal);
         HashSet<string> required = new(StringComparer.Ordinal);
-        Queue<string> pending = new();
+        Queue<string> pendingCapability = new();
+        Queue<string> pendingRequired = new();
 
-        void Require(string typeName)
+        void RequireCapability(string typeName)
         {
+            if (capability.Add(typeName))
+                pendingCapability.Enqueue(typeName);
+        }
+
+        void RequireOperation(string typeName)
+        {
+            RequireCapability(typeName);
+
             if (required.Add(typeName))
-                pending.Enqueue(typeName);
+                pendingRequired.Enqueue(typeName);
         }
 
         // A type that configures identity (or was discovered with the requirement) is a root of the
         // requirement: its own file honors a supplied state, so everything it clones through another
-        // generated file has to honor it too.
+        // generated file has to honor it too. Only the discovery surfaces make the operation itself
+        // a hard requirement.
         foreach (TypeModel model in byFqn.Values)
         {
-            if (model.SupportsStateTracking)
-                Require(model.FullyQualifiedName);
+            if (model.SupportsStateTracking || model.IdentityPreservationRequired)
+                RequireCapability(model.FullyQualifiedName);
         }
 
         foreach (string typeName in discovery.IdentityPreservationRequirements)
-            Require(typeName);
+            RequireOperation(typeName);
 
-        while (pending.Count > 0)
+        foreach (DiscoveredGenericRoot root in discovery.Roots)
         {
-            string typeName = pending.Dequeue();
+            if (root.Model is { IdentityPreservationRequired: true } model)
+                RequireOperation(model.FullyQualifiedName);
+        }
+
+        while (pendingCapability.Count > 0 || pendingRequired.Count > 0)
+        {
+            bool requiredPass = pendingRequired.Count > 0;
+            string typeName = requiredPass ? pendingRequired.Dequeue() : pendingCapability.Dequeue();
+
+            // A required root keeps requiring the operation across the whole graph it clones; a
+            // merely capable one keeps only the capability.
+            Action<string> require = requiredPass ? RequireOperation : RequireCapability;
+
             if (!byFqn.TryGetValue(typeName, out TypeModel? model))
                 continue;
 
             HashSet<string> visited = new(StringComparer.Ordinal);
             foreach (MemberModel member in EnumerateMembers(model, visited))
-                CollectCrossFileRelations(member, Require);
+                CollectCrossFileRelations(member, require);
 
             foreach (TypeModel derived in model.DerivedTypes)
-                Require(derived.FullyQualifiedName);
+                require(derived.FullyQualifiedName);
+
+            // A clonable closed argument dispatched by the generated Cloner<T> helper has its own
+            // root in this compilation, and the helper hands the state straight to it. That root has
+            // to be able to use it, exactly like a clonable member's file.
+            foreach (GenericUsage usage in usages)
+            {
+                if (usage.IsClonable &&
+                    usage.IsDeclaredInCompilation &&
+                    string.Equals(usage.GenericTypeMetadataName, typeName, StringComparison.Ordinal))
+                {
+                    require(usage.ArgumentTypeMetadataName);
+                }
+            }
         }
 
-        return new EquatableArray<string>(required.OrderBy(static name => name, StringComparer.Ordinal).ToArray());
+        return new IdentityRequirementSet(
+            new EquatableArray<string>(capability.OrderBy(static name => name, StringComparer.Ordinal).ToArray()),
+            new EquatableArray<string>(required.OrderBy(static name => name, StringComparer.Ordinal).ToArray()));
     }
 
     /// <summary>

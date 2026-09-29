@@ -89,6 +89,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
+                        context.RecordRuntimeBoundary(
+                            $"the member '{member.Name}' of type '{member.TypeFullName}' is resolved at runtime, so the generated state cannot cover it");
                         // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
                         // The ambient state is forwarded unchanged: this member's type is not cloned by
                         // generated code at all — Cloner<T> ends in the runtime cloner, which tracks
@@ -244,6 +246,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
+                        context.RecordRuntimeBoundary(
+                            $"the member '{member.Name}' of type '{member.TypeFullName}' is resolved at runtime, so the generated state cannot cover it");
                         // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
                         // Raw state, exactly as in GetMemberAssignment: the runtime cloner tracks
                         // references on its own terms, so a member-level override cannot apply here.
