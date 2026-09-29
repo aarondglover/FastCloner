@@ -361,6 +361,7 @@ internal static class MemberCloneGenerator
     /// </summary>
     public static bool MemberNeedsCircularRefTracking(CloneGeneratorContext context, MemberModel member)
     {
+        // An explicit member-level decision is always honored, including a negative one.
         if (member.PreserveIdentity is not null)
         {
             return member.PreserveIdentity.Value;

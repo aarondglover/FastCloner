@@ -61,10 +61,6 @@ internal static class CollectionHelperGenerator
         // A member-level [FastClonerPreserveIdentity(false)] also requires the parameter, so the
         // opt-out can be handed to this helper even when no default behaviour needs state.
         bool needsState = context.HelperAcceptsState(typeName);
-        // Implicit bodies build their instance with an object initializer, so their members are cloned
-        // before the instance can be registered in the reference map. A member-level opt-out inside
-        // such a body is therefore not replaced by the body's own state: there is no registration to
-        // close a cycle with yet, and dropping the opt-out would lose it outright.
         StringBuilder sb = context.Source;
 
         if (needsState)

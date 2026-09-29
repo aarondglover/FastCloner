@@ -25,6 +25,14 @@ internal sealed class CloneGeneratorContext
     
     public bool CanHaveCircularReferences { get; set; }
     public bool NeedsStateTracking { get; set; }
+
+    /// <summary>
+    /// Whether a tracking state supplied to <c>InternalFastDeepClone(source, state)</c> is honored
+    /// throughout this file's generated graph (helpers included). This is the capability behind an
+    /// explicit <c>FastDeepClone(FastCloneOptions.PreserveIdentity)</c> operation and is a superset of
+    /// <see cref="NeedsStateTracking"/>: it never changes what the public default entry point does.
+    /// </summary>
+    public bool StateCapable { get; }
     public bool IsFastClonerAvailable { get; }
     public TargetFramework TargetFramework { get; }
     public BridgeContract BridgeContract { get; }
@@ -62,6 +70,7 @@ internal sealed class CloneGeneratorContext
             }
         }
         NeedsStateTracking = model.NeedsStateTracking || anyMemberNeedsIdentity;
+        StateCapable = NeedsStateTracking || model.SupportsStateTracking;
         
         _typeNameToMethodName = sharedMethodNames ?? new Dictionary<string, string>();
         _neededHelperMethods = sharedNeededHelpers ?? [];
@@ -131,8 +140,9 @@ internal sealed class CloneGeneratorContext
     /// Capability is derived from the model the helper is generated from, never from the member being
     /// emitted, so signature and call arguments always agree. It is widened (never narrowed) by
     /// <see cref="RequiresIdentityOptOutPropagation"/> because an opt-out has to reach helpers nested
-    /// inside the opted-out subgraph. Both inputs are immutable, so the cache is safe and the result
-    /// does not depend on the order in which usages are discovered.
+    /// inside the opted-out subgraph, and by <see cref="StateCapable"/> because an explicit
+    /// identity-preserving operation has to reach them for the same reason. Both inputs are immutable,
+    /// so the cache is safe and the result does not depend on the order in which usages are discovered.
     /// </summary>
     public bool HelperAcceptsState(string typeFullName)
     {
@@ -141,7 +151,7 @@ internal sealed class CloneGeneratorContext
             return recorded;
         }
 
-        bool accepts = RequiresIdentityOptOutPropagation || DefaultStateRequirement(typeFullName);
+        bool accepts = RequiresIdentityOptOutPropagation || StateCapable || DefaultStateRequirement(typeFullName);
         _helperAcceptsState[typeFullName] = accepts;
         return accepts;
     }

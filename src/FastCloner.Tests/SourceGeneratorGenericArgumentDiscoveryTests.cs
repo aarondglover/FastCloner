@@ -1,6 +1,7 @@
 using FastCloner.SourceGenerator.Shared;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace FastCloner.Tests;
@@ -212,6 +213,10 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
     {
         [FastClonerDiscoverGenericArguments]
         void Execute<TInput, TOutput>();
+
+        // Deliberately unmarked: its type arguments must never be discovered, even though the
+        // containing type declares a marked method.
+        void Unmarked<TUnrelated>();
     }
 
     public sealed class DiscoveryStage : IDiscoveryStage<DiscoveryContext>
@@ -219,6 +224,31 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
         public void Execute<TInput, TOutput>()
         {
         }
+
+        public void Unmarked<TUnrelated>()
+        {
+        }
+    }
+
+    public class DiscoveryUnmarkedMethodPayload
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task UnmarkedGenericMethodOnMarkedContainingType_ShouldNotDiscoverItsArguments()
+    {
+        IDiscoveryStage<DiscoveryContext> stage = new DiscoveryStage();
+        stage.Unmarked<DiscoveryUnmarkedMethodPayload>();
+
+        // The marked method and the marked containing type still discover their own arguments.
+        DiscoveryContext contextClone = new DiscoveryContext { Id = Guid.NewGuid() }.FastDeepClone();
+        await Assert.That(contextClone).IsNotNull();
+
+        await Assert.That(typeof(SourceGeneratorGenericArgumentDiscoveryTests).Assembly
+                .GetType("FastCloner.Tests.DiscoveryUnmarkedMethodPayloadFastDeepCloneExtensions")).IsNull()
+            .Because("only the marked method contributes its type arguments; an unmarked generic method on the same type must not");
     }
 
     public class DiscoveryStageForm
@@ -330,7 +360,7 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
 
     #endregion
 
-    #region Identity preservation
+    #region Identity preservation capability
 
     public class DiscoveryIdentityNode
     {
@@ -349,23 +379,36 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
     {
     }
 
+    private static (DiscoveryIdentityRoot Original, DiscoveryIdentityNode Shared) CreateSharedIdentityGraph()
+    {
+        DiscoveryIdentityNode shared = new() { Value = 11 };
+        return (new DiscoveryIdentityRoot { Name = "root", Left = shared, Right = shared }, shared);
+    }
+
     [Test]
     [SourceGeneratorCompatible]
-    public async Task PreserveIdentityDiscoveryPoint_ShouldKeepSharedReferencesShared()
+    public async Task PreservingSurface_ShouldOnlyAddCapability_NotChangeDefaultBehavior()
     {
+        // The surface declares the capability; it must not change what FastDeepClone() does.
         IDiscoveryIdentitySurface<DiscoveryIdentityRoot>? surface = null;
         await Assert.That(surface).IsNull();
 
-        DiscoveryIdentityNode shared = new() { Value = 11 };
-        DiscoveryIdentityRoot original = new() { Name = "root", Left = shared, Right = shared };
+        (DiscoveryIdentityRoot original, DiscoveryIdentityNode shared) = CreateSharedIdentityGraph();
 
-        DiscoveryIdentityRoot clone = original.FastDeepClone();
+        DiscoveryIdentityRoot defaultClone = original.FastDeepClone();
 
-        await Assert.That(clone).IsNotSameReferenceAs(original);
-        await Assert.That(clone.Left).IsNotSameReferenceAs(original.Left);
-        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right)
-            .Because("identity preservation declared on the discovery point must survive cloning");
-        await Assert.That(clone.Left!.Value).IsEqualTo(11);
+        await Assert.That(defaultClone).IsNotSameReferenceAs(original);
+        await Assert.That(defaultClone.Left).IsNotSameReferenceAs(original.Left);
+        await Assert.That(defaultClone.Left).IsNotSameReferenceAs(defaultClone.Right)
+            .Because("a discovery surface declaring PreserveIdentity must not change the type's default behavior");
+
+        DiscoveryIdentityRoot preservingClone = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+
+        await Assert.That(preservingClone).IsNotSameReferenceAs(original);
+        await Assert.That(preservingClone.Left).IsNotSameReferenceAs(original.Left);
+        await Assert.That(preservingClone.Left).IsSameReferenceAs(preservingClone.Right)
+            .Because("an explicit operation-level request is the strongest requirement for that invocation");
+        await Assert.That(preservingClone.Left!.Value).IsEqualTo(shared.Value);
     }
 
     public class DiscoveryDefaultIdentityNode
@@ -387,7 +430,7 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
 
     [Test]
     [SourceGeneratorCompatible]
-    public async Task DefaultDiscoveryPoint_ShouldRetainDefaultIdentityBehavior()
+    public async Task OrdinarySurface_ShouldNotGenerateThePreservingOperation()
     {
         IDiscoveryDefaultSurface<DiscoveryDefaultIdentityRoot>? surface = null;
         await Assert.That(surface).IsNull();
@@ -401,7 +444,21 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
         await Assert.That(clone.Left).IsNotSameReferenceAs(original.Left);
         await Assert.That(clone.Right).IsNotSameReferenceAs(original.Right);
         await Assert.That(clone.Left).IsNotSameReferenceAs(clone.Right)
-            .Because("without PreserveIdentity the default no-identity behavior is retained");
+            .Because("the default no-identity behavior is retained");
+
+        // Capability is opt-in: without a requirement the overload does not exist, so a caller
+        // cannot silently receive a clone that ignores the requested guarantee.
+        Type? extensions = typeof(SourceGeneratorGenericArgumentDiscoveryTests).Assembly
+            .GetType("FastCloner.Tests.DiscoveryDefaultIdentityRootFastDeepCloneExtensions");
+        await Assert.That(extensions).IsNotNull();
+        await Assert.That(extensions!.GetMethods().Any(m => m.Name == "FastDeepClone" && m.GetParameters().Length == 2)).IsFalse()
+            .Because("no surface required identity preservation for this type");
+
+        Type? capableExtensions = typeof(SourceGeneratorGenericArgumentDiscoveryTests).Assembly
+            .GetType("FastCloner.Tests.DiscoveryIdentityRootFastDeepCloneExtensions");
+        await Assert.That(capableExtensions).IsNotNull();
+        await Assert.That(capableExtensions!.GetMethods().Any(m => m.Name == "FastDeepClone" && m.GetParameters().Length == 2)).IsTrue()
+            .Because("the preserving surface requires the capability, so the overload must exist");
     }
 
     public class DiscoveryMergedRoot
@@ -428,7 +485,7 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
 
     [Test]
     [SourceGeneratorCompatible]
-    public async Task TypeDiscoveredThroughSeveralSurfaces_ShouldPreserveIdentityWhenAnySurfaceRequestsIt()
+    public async Task TypeDiscoveredThroughSeveralSurfaces_ShouldCombineCapabilityWithoutChoosingABehavior()
     {
         IDiscoveryPlainSurface<DiscoveryMergedRoot>? plain = null;
         IDiscoveryPreservingSurface<DiscoveryMergedRoot>? preserving = null;
@@ -438,11 +495,116 @@ public class SourceGeneratorGenericArgumentDiscoveryTests
         DiscoveryMergedNode shared = new() { Value = 8 };
         DiscoveryMergedRoot original = new() { Name = "merged", Left = shared, Right = shared };
 
-        DiscoveryMergedRoot clone = original.FastDeepClone();
+        // The ordinary surface does not win over the preserving one: there is nothing to win.
+        // One root is generated and its default behavior is unchanged.
+        DiscoveryMergedRoot defaultClone = original.FastDeepClone();
+        await Assert.That(defaultClone.Left).IsNotSameReferenceAs(defaultClone.Right);
 
-        await Assert.That(clone.Left).IsSameReferenceAs(clone.Right)
-            .Because("a type discovered through several surfaces is generated once, and identity preservation wins");
-        await Assert.That(clone.Left!.Value).IsEqualTo(8);
+        // The requirement from either surface is enough to serve an explicit preserving operation.
+        DiscoveryMergedRoot preservingClone = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+        await Assert.That(preservingClone.Left).IsSameReferenceAs(preservingClone.Right)
+            .Because("a capability requirement from any surface enables the explicit preserving operation");
+        await Assert.That(preservingClone.Left!.Value).IsEqualTo(8);
+    }
+
+    #endregion
+
+    #region Explicit identity configuration
+
+    public class DiscoveryNonPreservingNode
+    {
+        public int Value { get; set; }
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(false)]
+    public class DiscoveryNonPreservingPayload
+    {
+        public string Name { get; set; } = string.Empty;
+        public DiscoveryNonPreservingNode? Left { get; set; }
+        public DiscoveryNonPreservingNode? Right { get; set; }
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task ExplicitlyDisabledIdentityType_ShouldKeepDefaultAndHonorTheExplicitOperation()
+    {
+        DiscoveryNonPreservingNode shared = new() { Value = 5 };
+        DiscoveryNonPreservingPayload original = new() { Name = "x", Left = shared, Right = shared };
+
+        DiscoveryNonPreservingPayload defaultClone = original.FastDeepClone();
+        await Assert.That(defaultClone.Left).IsNotSameReferenceAs(defaultClone.Right)
+            .Because("[FastClonerPreserveIdentity(false)] keeps its non-preserving default");
+
+        DiscoveryNonPreservingPayload preservingClone = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+        await Assert.That(preservingClone).IsNotSameReferenceAs(original);
+        await Assert.That(preservingClone.Left).IsSameReferenceAs(preservingClone.Right)
+            .Because("an explicit operation-level request wins for that invocation");
+        await Assert.That(preservingClone.Left!.Value).IsEqualTo(5);
+    }
+
+    public class DiscoveryPreservingNode
+    {
+        public int Value { get; set; }
+    }
+
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity(true)]
+    public class DiscoveryPreservingPayload
+    {
+        public string Name { get; set; } = string.Empty;
+        public DiscoveryPreservingNode? Left { get; set; }
+        public DiscoveryPreservingNode? Right { get; set; }
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task ExplicitlyEnabledIdentityType_ShouldKeepItsDefaultAndAlsoServeTheExplicitOperation()
+    {
+        DiscoveryPreservingNode shared = new() { Value = 13 };
+        DiscoveryPreservingPayload original = new() { Name = "y", Left = shared, Right = shared };
+
+        DiscoveryPreservingPayload defaultClone = original.FastDeepClone();
+        await Assert.That(defaultClone.Left).IsSameReferenceAs(defaultClone.Right)
+            .Because("[FastClonerPreserveIdentity(true)] keeps its preserving default");
+
+        DiscoveryPreservingPayload preservingClone = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+        await Assert.That(preservingClone.Left).IsSameReferenceAs(preservingClone.Right);
+        await Assert.That(preservingClone.Left).IsNotSameReferenceAs(shared);
+    }
+
+    public class DiscoveryAlreadyClonableNode
+    {
+        public int Value { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class DiscoveryAlreadyClonablePayload
+    {
+        public string Name { get; set; } = string.Empty;
+        public DiscoveryAlreadyClonableNode? Left { get; set; }
+        public DiscoveryAlreadyClonableNode? Right { get; set; }
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task AlreadyClonableTypeDiscoveredFromPreservingSurface_ShouldGainCapabilityWithoutChangingDefault()
+    {
+        // The usage is the discovery point; the type keeps the single root it already had.
+        IDiscoveryPreservingSurface<DiscoveryAlreadyClonablePayload>? surface = null;
+        await Assert.That(surface).IsNull();
+
+        DiscoveryAlreadyClonableNode shared = new() { Value = 21 };
+        DiscoveryAlreadyClonablePayload original = new() { Name = "z", Left = shared, Right = shared };
+
+        DiscoveryAlreadyClonablePayload defaultClone = original.FastDeepClone();
+        await Assert.That(defaultClone.Left).IsNotSameReferenceAs(defaultClone.Right)
+            .Because("the existing root keeps its default behavior");
+
+        DiscoveryAlreadyClonablePayload preservingClone = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+        await Assert.That(preservingClone.Left).IsSameReferenceAs(preservingClone.Right)
+            .Because("the discovery requirement must converge into the existing generated root");
+        await Assert.That(preservingClone.Left!.Value).IsEqualTo(21);
     }
 
     #endregion

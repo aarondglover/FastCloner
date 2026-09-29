@@ -33,4 +33,11 @@ internal sealed record TypeModel(
     bool CodeAnalysisAvailable = false, // Whether System.Diagnostics.CodeAnalysis attributes are available
     bool IsPolymorphicRoot = false, // Non-abstract root marked [FastClonerPolymorphic]: dispatch by runtime type to subtype cloners
     TargetFramework TargetFramework = TargetFramework.NetStandard20, // Detected target framework for TFM-specific optimizations
-    EquatableArray<string> CircularAnalysisLog = default) : IEquatable<TypeModel>;
+    EquatableArray<string> CircularAnalysisLog = default,
+    // Capability, not behavior: a tracking state supplied to InternalFastDeepClone is honored
+    // throughout this type's generated graph, so an explicit identity-preserving operation
+    // (FastDeepClone(FastCloneOptions.PreserveIdentity)) can rely on it. NeedsStateTracking stays
+    // the only thing that decides the default behavior of the public entry point. Implied by
+    // NeedsStateTracking, by identity configuration on the type itself, and by a
+    // [FastClonerDiscoverGenericArguments(PreserveIdentity = true)] requirement.
+    bool SupportsStateTracking = false) : IEquatable<TypeModel>;

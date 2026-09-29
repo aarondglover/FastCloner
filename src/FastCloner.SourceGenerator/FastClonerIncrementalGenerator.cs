@@ -132,22 +132,43 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                 return new EquatableArray<ClosedSubtypeUsage>(merged.Distinct().ToArray());
             });
 
-        IncrementalValuesProvider<(((Result<TypeModel> Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> combinedPipeline =
-            pipeline.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
-
         // Discovery pipeline: closed usages of [FastClonerDiscoverGenericArguments] API surfaces
         // contribute additional clone roots. Driven from usage syntax rather than from the
         // attribute so that a marked declaration living in a referenced assembly still acts as a
         // discovery point for this compilation.
-        IncrementalValuesProvider<DiscoveredGenericRoot> discoveredRoots = context.SyntaxProvider.CreateSyntaxProvider(
+        IncrementalValueProvider<GenericArgumentDiscoveryResult> discoveryResult = context.SyntaxProvider.CreateSyntaxProvider(
             predicate: GenericArgumentDiscoveryCollector.IsCandidate,
             transform: static (ctx, _) => ctx)
             .Combine(targetFrameworkProvider)
             .Combine(externalIgnoreProvider)
             .Select(static (pair, cancellationToken) => GenericArgumentDiscoveryCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
-            .Where(static x => x.Count > 0)
+            .Where(static result => result.Roots.Count > 0 || result.IdentityPreservationRequirements.Count > 0)
             .Collect()
-            .SelectMany(static (lists, _) => GenericArgumentDiscoveryCollector.Merge(lists));
+            .Select(static (results, _) => GenericArgumentDiscoveryCollector.Merge(results));
+
+        // Types that already have a generated root through [FastClonerClonable] keep that single root
+        // and only gain the capability to honor a supplied tracking state. This never changes their
+        // default behavior and never produces a second entry point.
+        IncrementalValueProvider<EquatableArray<string>> identityPreservationRequirements = discoveryResult
+            .Select(static (result, _) => result.IdentityPreservationRequirements);
+
+        IncrementalValuesProvider<Result<TypeModel>> pipelineWithCapability = pipeline
+            .Combine(identityPreservationRequirements)
+            .Select(static (pair, _) =>
+            {
+                (Result<TypeModel> result, EquatableArray<string> requirements) = pair;
+
+                if (!result.IsSuccess || result.Value is not TypeModel model || requirements.Count == 0)
+                    return result;
+
+                if (!requirements.Contains(model.FullyQualifiedName))
+                    return result;
+
+                return Result<TypeModel>.Success(model with { SupportsStateTracking = true });
+            });
+
+        IncrementalValuesProvider<DiscoveredGenericRoot> discoveredRoots = discoveryResult
+            .SelectMany(static (result, _) => result.Roots);
 
         IncrementalValuesProvider<(((DiscoveredGenericRoot Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> discoveryPipeline =
             discoveredRoots.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
@@ -156,6 +177,9 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         // All type analysis is pre-computed in TypeModel during the transform step.
         // This ensures the generator only re-runs when decorated types actually change,
         // not on every keypress.
+        IncrementalValuesProvider<(((Result<TypeModel> Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> combinedPipeline =
+            pipelineWithCapability.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
+
         context.RegisterSourceOutput(combinedPipeline, static (ctx, source) =>
         {
             var (((result, usages), subtypeUsages), contract) = source;

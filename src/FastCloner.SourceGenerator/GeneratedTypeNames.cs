@@ -13,9 +13,16 @@ internal static class GeneratedTypeNames
     public const string CloneState = "global::FastCloner.SourceGenerator.Shared.FcGeneratedCloneState";
 
     /// <summary>
+    /// <summary>
     /// State instance meaning "explicitly do not preserve identity". Emitted for members marked
     /// <c>[FastClonerPreserveIdentity(false)]</c>; <c>null</c> cannot express that because it
     /// means "no state supplied, use the target type's own default".
     /// </summary>
     public const string NoTrackingCloneState = "global::FastCloner.SourceGenerator.Shared.FcGeneratedCloneState.NoReferenceTracking";
+
+    /// <summary>
+    /// Operation-level options accepted by the generated <c>FastDeepClone</c> overload that can
+    /// positively require identity preservation for a single call.
+    /// </summary>
+    public const string FastCloneOptions = "global::FastCloner.SourceGenerator.Shared.FastCloneOptions";
 }

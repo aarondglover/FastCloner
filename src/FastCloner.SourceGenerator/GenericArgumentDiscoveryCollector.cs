@@ -55,6 +55,19 @@ internal readonly struct DiscoveredGenericRoot : IEquatable<DiscoveredGenericRoo
 }
 
 /// <summary>
+/// Outcome of discovery for one compilation.
+/// <br/><br/>
+/// <see cref="Roots"/> are types that need a new generated root.
+/// <see cref="IdentityPreservationRequirements"/> name types whose root is generated elsewhere
+/// (they already carry <c>[FastClonerClonable]</c>) and that must gain the capability to honor a
+/// supplied tracking state. A requirement never changes such a type's default behavior and never
+/// produces a second implementation.
+/// </summary>
+internal readonly record struct GenericArgumentDiscoveryResult(
+    EquatableArray<DiscoveredGenericRoot> Roots,
+    EquatableArray<string> IdentityPreservationRequirements);
+
+/// <summary>
 /// Discovers clone roots from closed usages of generic API surfaces marked with
 /// <c>[FastClonerDiscoverGenericArguments]</c>.
 /// <br/><br/>
@@ -67,6 +80,9 @@ internal static class GenericArgumentDiscoveryCollector
 {
     private const string DiscoveryAttributeName = "FastCloner.SourceGenerator.Shared.FastClonerDiscoverGenericArgumentsAttribute";
 
+    private static readonly GenericArgumentDiscoveryResult Empty =
+        new(EquatableArray<DiscoveredGenericRoot>.Empty, EquatableArray<string>.Empty);
+
     /// <summary>
     /// Syntax gate for the usage pipeline. Generic methods resolve through the same node type
     /// as generic types, so a single predicate covers types, interfaces, delegates and methods.
@@ -76,7 +92,7 @@ internal static class GenericArgumentDiscoveryCollector
         return node is GenericNameSyntax;
     }
 
-    public static EquatableArray<DiscoveredGenericRoot> Collect(
+    public static GenericArgumentDiscoveryResult Collect(
         GeneratorSyntaxContext context,
         TargetFramework targetFramework,
         ExternalIgnoreRegistry externalIgnores,
@@ -85,120 +101,155 @@ internal static class GenericArgumentDiscoveryCollector
         GenericNameSyntax node = (GenericNameSyntax)context.Node;
 
         ISymbol? symbol = context.SemanticModel.GetSymbolInfo(node, cancellationToken).Symbol;
-        if (symbol == null || !TryGetDiscoverySurface(symbol, out bool preserveIdentity))
-            return EquatableArray<DiscoveredGenericRoot>.Empty;
+        DiscoverySurface? surface = symbol == null ? null : GetDiscoverySurface(symbol);
+        if (surface is not { } discovery)
+            return Empty;
 
         List<ITypeSymbol> arguments = [];
         switch (symbol)
         {
-            case INamedTypeSymbol { IsGenericType: true } named:
+            case INamedTypeSymbol { IsGenericType: true } named when discovery.MarkedType:
                 arguments.AddRange(named.TypeArguments);
                 break;
             case IMethodSymbol method:
-                arguments.AddRange(method.TypeArguments);
+                // Only the method's own arguments when the method itself is marked. An unmarked
+                // generic method on a marked containing type must not contribute its arguments.
+                if (discovery.MarkedMethod)
+                    arguments.AddRange(method.TypeArguments);
 
-                // A marked method on a generic containing type contributes both sources of
-                // closed generic information: the method's own arguments and the closed
-                // arguments of the containing type.
-                if (method.ContainingType is { IsGenericType: true } containingType)
+                // A marked method on a generic containing type contributes both sources of closed
+                // generic information, and a marked containing type is itself a discovery point.
+                if (discovery.MarkedType && method.ContainingType is { IsGenericType: true } containingType)
                     arguments.AddRange(containingType.TypeArguments);
 
                 break;
         }
 
         if (arguments.Count == 0)
-            return EquatableArray<DiscoveredGenericRoot>.Empty;
+            return Empty;
 
         Compilation compilation = context.SemanticModel.Compilation;
         bool nullability = context.SemanticModel.GetNullableContext(node.SpanStart).HasFlag(NullableContext.Enabled);
 
         List<DiscoveredGenericRoot> roots = [];
         HashSet<string> seen = new(StringComparer.Ordinal);
+        HashSet<string> capabilityRequirements = new(StringComparer.Ordinal);
 
         foreach (ITypeSymbol argument in arguments)
-            CollectRoots(argument, compilation, nullability, targetFramework, externalIgnores, preserveIdentity, roots, seen);
+        {
+            CollectRoots(
+                argument,
+                compilation,
+                nullability,
+                targetFramework,
+                externalIgnores,
+                discovery.RequiresIdentityPreservation,
+                roots,
+                seen,
+                capabilityRequirements);
+        }
 
-        return new EquatableArray<DiscoveredGenericRoot>(roots.ToArray());
+        return new GenericArgumentDiscoveryResult(
+            new EquatableArray<DiscoveredGenericRoot>(roots.ToArray()),
+            new EquatableArray<string>(capabilityRequirements.OrderBy(static name => name, StringComparer.Ordinal).ToArray()));
     }
 
     /// <summary>
     /// Merges the per-usage results into one deduplicated, deterministically ordered set.
-    /// When the same type is discovered through several surfaces, the identity-preserving
-    /// model wins: root identity is a property of the discovered type, not of the surface
-    /// that happened to discover it first.
+    /// <br/><br/>
+    /// Capability is a union, not a contest: when the same type is discovered through several
+    /// surfaces, any surface requiring identity preservation only adds the capability to honor a
+    /// supplied tracking state. The type's default behavior is identical either way, so there is no
+    /// "winning" surface.
     /// </summary>
-    public static IEnumerable<DiscoveredGenericRoot> Merge(ImmutableArray<EquatableArray<DiscoveredGenericRoot>> lists)
+    public static GenericArgumentDiscoveryResult Merge(ImmutableArray<GenericArgumentDiscoveryResult> results)
     {
-        Dictionary<string, DiscoveredGenericRoot> merged = new(StringComparer.Ordinal);
+        Dictionary<string, DiscoveredGenericRoot> roots = new(StringComparer.Ordinal);
+        HashSet<string> capabilityRequirements = new(StringComparer.Ordinal);
 
-        foreach (EquatableArray<DiscoveredGenericRoot> list in lists)
+        foreach (GenericArgumentDiscoveryResult result in results)
         {
-            foreach (DiscoveredGenericRoot root in list)
+            foreach (string requirement in result.IdentityPreservationRequirements)
+                capabilityRequirements.Add(requirement);
+
+            foreach (DiscoveredGenericRoot root in result.Roots)
             {
                 string key = root.Model != null
                     ? root.Model.FullyQualifiedName
                     : $"{root.Failure?.Id}:{root.Failure?.GetMessage()}";
 
-                if (!merged.TryGetValue(key, out DiscoveredGenericRoot existing))
+                if (!roots.TryGetValue(key, out DiscoveredGenericRoot existing))
                 {
-                    merged[key] = root;
+                    roots[key] = root;
                     continue;
                 }
 
-                if (PreservesIdentity(root.Model) && !PreservesIdentity(existing.Model))
-                    merged[key] = root;
+                if (root.Model is { SupportsStateTracking: true } && existing.Model is { SupportsStateTracking: false })
+                    roots[key] = root;
             }
         }
 
-        return merged.Values
-            .OrderBy(static root => root.Model?.FullyQualifiedName ?? root.Failure?.Id, StringComparer.Ordinal)
-            .ToArray();
-    }
-
-    private static bool PreservesIdentity(TypeModel? model)
-    {
-        return model is { PreserveIdentity: true };
+        return new GenericArgumentDiscoveryResult(
+            new EquatableArray<DiscoveredGenericRoot>(roots.Values
+                .OrderBy(static root => root.Model?.FullyQualifiedName ?? root.Failure?.Id, StringComparer.Ordinal)
+                .ToArray()),
+            new EquatableArray<string>(capabilityRequirements
+                .OrderBy(static name => name, StringComparer.Ordinal)
+                .ToArray()));
     }
 
     /// <summary>
-    /// Decides whether a closed usage of <paramref name="symbol"/> is a discovery point and
-    /// whether roots discovered through it should preserve identity.
+    /// Which declaration of a closed usage is a discovery point, and whether that surface requires
+    /// the discovered types to have identity-preservation capability.
     /// </summary>
-    private static bool TryGetDiscoverySurface(ISymbol symbol, out bool preserveIdentity)
-    {
-        preserveIdentity = false;
+    private readonly record struct DiscoverySurface(
+        bool MarkedMethod,
+        bool MarkedType,
+        bool RequiresIdentityPreservation);
 
+    private static DiscoverySurface? GetDiscoverySurface(ISymbol symbol)
+    {
         switch (symbol)
         {
             case INamedTypeSymbol { IsGenericType: true } type:
-                return TryGetTypeSurface(type.OriginalDefinition, ref preserveIdentity);
+            {
+                bool typeRequires = false;
+                bool markedType = TryGetTypeSurface(type.OriginalDefinition, ref typeRequires);
+                return markedType ? new DiscoverySurface(MarkedMethod: false, MarkedType: true, typeRequires) : null;
+            }
             case IMethodSymbol method:
             {
-                bool marked = TryGetDiscoveryAttribute(method.OriginalDefinition, ref preserveIdentity);
+                bool methodRequires = false;
+                bool markedMethod = TryGetDiscoveryAttribute(method.OriginalDefinition, ref methodRequires);
+                bool markedType = false;
+                bool typeRequires = false;
 
                 if (method.ContainingType is { IsGenericType: true } containingType)
-                    marked |= TryGetTypeSurface(containingType.OriginalDefinition, ref preserveIdentity);
+                    markedType = TryGetTypeSurface(containingType.OriginalDefinition, ref typeRequires);
 
-                return marked;
+                if (!markedMethod && !markedType)
+                    return null;
+
+                return new DiscoverySurface(markedMethod, markedType, methodRequires || typeRequires);
             }
             default:
-                return false;
+                return null;
         }
     }
 
     /// <summary>
-    /// A generic type is a discovery surface when it carries the attribute itself, or when it
+    /// A generic type is a discovery point when it carries the attribute itself, or when it
     /// declares a marked method: <c>IStage&lt;T&gt;</c> with <c>[FastClonerDiscoverGenericArguments] void Execute()</c>
     /// makes a closed <c>IStage&lt;Form&gt;</c> usage expose <c>Form</c>.
     /// </summary>
-    private static bool TryGetTypeSurface(INamedTypeSymbol definition, ref bool preserveIdentity)
-    {
-        bool marked = TryGetDiscoveryAttribute(definition, ref preserveIdentity);
+    private static bool TryGetTypeSurface(INamedTypeSymbol definition, ref bool requiresIdentityPreservation)
+    {        requiresIdentityPreservation = false;
+        bool marked = TryGetDiscoveryAttribute(definition, ref requiresIdentityPreservation);
 
         foreach (ISymbol member in definition.GetMembers())
         {
             if (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } &&
-                TryGetDiscoveryAttribute(member, ref preserveIdentity))
+                TryGetDiscoveryAttribute(member, ref requiresIdentityPreservation))
             {
                 marked = true;
             }
@@ -207,7 +258,7 @@ internal static class GenericArgumentDiscoveryCollector
         return marked;
     }
 
-    private static bool TryGetDiscoveryAttribute(ISymbol symbol, ref bool preserveIdentity)
+    private static bool TryGetDiscoveryAttribute(ISymbol symbol, ref bool requiresIdentityPreservation)
     {
         foreach (AttributeData attribute in symbol.GetAttributes())
         {
@@ -216,8 +267,8 @@ internal static class GenericArgumentDiscoveryCollector
 
             foreach (KeyValuePair<string, TypedConstant> namedArgument in attribute.NamedArguments)
             {
-                if (namedArgument is { Key: "PreserveIdentity", Value.Value: bool enabled })
-                    preserveIdentity |= enabled;
+                if (namedArgument is { Key: "PreserveIdentity", Value.Value: bool required })
+                    requiresIdentityPreservation |= required;
             }
 
             return true;
@@ -242,13 +293,14 @@ internal static class GenericArgumentDiscoveryCollector
         bool nullability,
         TargetFramework targetFramework,
         ExternalIgnoreRegistry externalIgnores,
-        bool preserveIdentity,
+        bool requiresIdentityPreservation,
         List<DiscoveredGenericRoot> roots,
-        HashSet<string> seen)
+        HashSet<string> seen,
+        HashSet<string> capabilityRequirements)
     {
         if (argument is IArrayTypeSymbol array)
         {
-            CollectRoots(array.ElementType, compilation, nullability, targetFramework, externalIgnores, preserveIdentity, roots, seen);
+            CollectRoots(array.ElementType, compilation, nullability, targetFramework, externalIgnores, requiresIdentityPreservation, roots, seen, capabilityRequirements);
             return;
         }
 
@@ -271,7 +323,7 @@ internal static class GenericArgumentDiscoveryCollector
         if (named.IsGenericType)
         {
             foreach (ITypeSymbol typeArgument in named.TypeArguments)
-                CollectRoots(typeArgument, compilation, nullability, targetFramework, externalIgnores, preserveIdentity, roots, seen);
+                CollectRoots(typeArgument, compilation, nullability, targetFramework, externalIgnores, requiresIdentityPreservation, roots, seen, capabilityRequirements);
 
             return;
         }
@@ -280,10 +332,18 @@ internal static class GenericArgumentDiscoveryCollector
         if (TypeAnalyzer.IsCollectionType(named) || TypeAnalyzer.IsDictionaryType(named))
             return;
 
-        // Already a root through its own attribute; a second entry point would be a duplicate
-        // member of the generated extension class.
+        string key = TypeAnalyzer.GetTypeNameForSignature(named);
+
+        // Already a root through its own attribute: a second entry point would be a duplicate member
+        // of the same extension class. The requirement converges into that existing root instead, by
+        // asking it for the capability to honor a supplied tracking state.
         if (TypeAnalyzer.HasClonableAttribute(named))
+        {
+            if (requiresIdentityPreservation)
+                capabilityRequirements.Add(key);
+
             return;
+        }
 
         // Types from other assemblies are only rooted when the generator would already clone
         // them implicitly (public parameterless constructor). Member-wise cloners for arbitrary
@@ -291,11 +351,18 @@ internal static class GenericArgumentDiscoveryCollector
         if (!IsDeclaredInCompilation(named, compilation) && !TypeAnalyzer.IsImplicitCandidate(named))
             return;
 
-        string key = TypeAnalyzer.GetTypeNameForSignature(named);
         if (!seen.Add(key))
             return;
 
-        if (TypeModelFactory.TryCreate(named, nullability, compilation, targetFramework, externalIgnores, out TypeModel? model, out Diagnostic? error, preserveIdentity ? true : null))
+        if (TypeModelFactory.TryCreate(
+                named,
+                nullability,
+                compilation,
+                targetFramework,
+                externalIgnores,
+                out TypeModel? model,
+                out Diagnostic? error,
+                requiresIdentityPreservation))
         {
             roots.Add(new DiscoveredGenericRoot(model!));
         }
