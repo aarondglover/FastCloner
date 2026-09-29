@@ -387,13 +387,25 @@ You can also explicitly disable identity preservation for a member when the type
 public class Graph
 {
     public Node Root { get; set; }
-    
-    [FastClonerPreserveIdentity(false)] // Opt out for this member
-    public List<string> Labels { get; set; }
+
+    [FastClonerPreserveIdentity(false)] // Opt out for this member and its subgraph
+    public List<Node> Nodes { get; set; }
 }
 ```
 
-> **Note**: Identity preservation adds overhead for tracking seen objects. Circular references are always detected regardless of this setting.
+Member-level settings win over the type-level attribute, which wins over the default (off). So a
+member marked `false` stops identity preservation for its own subgraph even when the member's type is
+itself marked `[FastClonerPreserveIdentity(true)]`.
+
+The override covers members cloned by generated code: clonable members, implicit (unannotated) POCOs,
+collections, arrays and dictionaries. It does not reach members the generator cannot clone itself
+(`object`, type parameters, other runtime-cloned members) or non-public members on target frameworks
+below .NET 8, which are cloned through the runtime bridge; those paths track references on the runtime
+engine's own terms. Types registered in a `FastClonerContext` are cloned by the context's own generated
+cloners, which decide reference tracking from the registered-type graph; a member-level opt-out inside a
+context graph can therefore be overridden by that analysis.
+
+> **Note**: Identity preservation adds overhead for tracking seen objects. Circular references are always detected regardless of this setting — a type whose subgraph can contain cycles keeps tracking references even when a member opts out, because cycle detection and identity preservation share the same reference map.
 
 ## Limitations
 

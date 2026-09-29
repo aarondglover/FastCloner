@@ -43,7 +43,8 @@ internal static class ClassCloneBodyGenerator
         CloneGeneratorContext ctx,
         IEnumerable<MemberModel> members,
         string sourceVar,
-        string stateVar)
+        string stateVar,
+        bool cycleContinuity = false)
     {
         List<string> assignments = [];
         foreach (MemberModel member in members)
@@ -51,7 +52,7 @@ internal static class ClassCloneBodyGenerator
             if (!MustAssignInObjectInitializer(member))
                 continue;
 
-            string assignment = MemberCloneGenerator.GetMemberAssignment(ctx, member, sourceVar, stateVar, "                ");
+            string assignment = MemberCloneGenerator.GetMemberAssignment(ctx, member, sourceVar, stateVar, "                ", cycleContinuity);
             if (!string.IsNullOrEmpty(assignment))
                 assignments.Add($"                {assignment}");
         }
@@ -80,7 +81,8 @@ internal static class ClassCloneBodyGenerator
         bool useState,
         string? stateVarName = null,
         bool useNullConditional = false,
-        string sourceVarName = "source")
+        string sourceVarName = "source",
+        bool cycleContinuity = false)
     {
         StringBuilder sb = ctx.Source;
         bool hasParameterlessConstructor = ctx.Model.HasParameterlessConstructor;
@@ -95,7 +97,7 @@ internal static class ClassCloneBodyGenerator
 
         if (isRecord)
         {
-            WriteRecordCloneBodyWithState(ctx, sourceVarName, stateVar, useNullConditional);
+            WriteRecordCloneBodyWithState(ctx, sourceVarName, stateVar, useNullConditional, cycleContinuity);
             return;
         }
 
@@ -105,7 +107,7 @@ internal static class ClassCloneBodyGenerator
         {
             // Init/required members cannot be assigned after construction, regardless of
             // whether this body also tracks circular references.
-            WriteNewWithObjectInitializer(sb, typeName, CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar));
+            WriteNewWithObjectInitializer(sb, typeName, CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar, cycleContinuity));
         }
         else
         {
@@ -124,7 +126,7 @@ internal static class ClassCloneBodyGenerator
             if (hasParameterlessConstructor && MustAssignInObjectInitializer(member))
                 continue;
 
-            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, instanceCreatedWithoutConstructor);
+            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, instanceCreatedWithoutConstructor, cycleContinuity);
         }
             
         sb.AppendLine();
@@ -214,10 +216,11 @@ internal static class ClassCloneBodyGenerator
         CloneGeneratorContext ctx,
         string sourceVarName,
         string stateVar,
-        bool useNullConditional)
+        bool useNullConditional,
+        bool cycleContinuity)
     {
         StringBuilder sb = ctx.Source;
-        List<string> constructionAssignments = CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar);
+        List<string> constructionAssignments = CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar, cycleContinuity);
 
         if (constructionAssignments.Count > 0)
         {
@@ -240,11 +243,10 @@ internal static class ClassCloneBodyGenerator
             if (MustAssignInObjectInitializer(member))
                 continue;
 
-            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar);
+            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, cycleContinuity: cycleContinuity);
         }
 
         sb.AppendLine();
         sb.AppendLine("            return result;");
     }
 }
-

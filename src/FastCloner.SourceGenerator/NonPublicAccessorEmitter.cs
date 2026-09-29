@@ -139,7 +139,8 @@ internal static class NonPublicAccessorEmitter
         string resultVar,
         string sourceVar,
         string stateVar,
-        string indent)
+        string indent,
+        bool cycleContinuity = false)
     {
         string declaringFqnFallback = context.Model.FullyQualifiedName;
         bool declaringIsStruct = context.Model.IsStruct;
@@ -148,7 +149,7 @@ internal static class NonPublicAccessorEmitter
 
         if (context.TargetFramework >= TargetFramework.Net8)
         {
-            WriteUnsafeAccessorCall(context, sb, member, accessor, resultVar, sourceVar, stateVar, indent);
+            WriteUnsafeAccessorCall(context, sb, member, accessor, resultVar, sourceVar, stateVar, indent, cycleContinuity);
         }
         else
         {
@@ -164,7 +165,8 @@ internal static class NonPublicAccessorEmitter
         string resultVar,
         string sourceVar,
         string stateVar,
-        string indent)
+        string indent,
+        bool cycleContinuity = false)
     {
         string structRefSource = accessor.DeclaringTypeIsStruct ? "ref " : string.Empty;
         string structRefTarget = accessor.DeclaringTypeIsStruct ? "ref " : string.Empty;
@@ -185,7 +187,7 @@ internal static class NonPublicAccessorEmitter
             readExpression = $"{accessorPrefix}{getterAccessorId}({structRefSource}{sourceVar})";
         }
 
-        string clonedExpression = ProduceClonedExpression(context, member, readExpression, stateVar);
+        string clonedExpression = ProduceClonedExpression(context, member, readExpression, stateVar, cycleContinuity);
 
         if (accessor.IsBackingFieldStorage)
         {
@@ -248,7 +250,7 @@ internal static class NonPublicAccessorEmitter
         }
     }
 
-    private static string ProduceClonedExpression(CloneGeneratorContext context, MemberModel member, string readExpression, string stateVar)
+    private static string ProduceClonedExpression(CloneGeneratorContext context, MemberModel member, string readExpression, string stateVar, bool cycleContinuity)
     {
         // Null-forgiving operators: the accessor signatures drop nullability annotations, so a
         // legitimately nullable member value would otherwise raise CS8601/CS8604 in generated code.
@@ -261,7 +263,7 @@ internal static class NonPublicAccessorEmitter
                 return $"{readExpression}!";
 
             case MemberTypeKind.Clonable:
-                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {stateVar})!";
+                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {MemberCloneGenerator.GetMemberStateVar(member, stateVar, cycleContinuity)})!";
             
             default:
                 if (context.IsFastClonerAvailable)
