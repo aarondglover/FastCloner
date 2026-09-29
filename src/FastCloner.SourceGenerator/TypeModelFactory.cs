@@ -323,7 +323,8 @@ internal static class TypeModelFactory
             isPolymorphicRoot,
             targetFramework,
             new EquatableArray<string>(circRefLog.ToArray()),
-            supportsStateTracking);
+            supportsStateTracking,
+            requiresIdentityPreservationCapability);
 
         return true;
     }

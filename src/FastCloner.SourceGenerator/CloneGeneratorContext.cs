@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace FastCloner.SourceGenerator;
@@ -31,6 +32,38 @@ internal sealed class CloneGeneratorContext
     /// <see cref="NeedsStateTracking"/>: it never changes what the public default entry point does.
     /// </summary>
     public bool StateCapable { get; }
+
+    /// <summary>
+    /// True when a <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c> surface
+    /// requires this root to serve an explicit identity-preserving operation for its whole graph.
+    /// Unlike <see cref="StateCapable"/> this is a hard requirement: if the graph necessarily
+    /// delegates part of itself to the runtime cloner, the operation is withheld and the requirement
+    /// is reported.
+    /// </summary>
+    public bool IdentityPreservationRequired => Model.IdentityPreservationRequired;
+
+    /// <summary>
+    /// True when the type asked for identity preservation itself, so it exposes the operation-level
+    /// entry point even without a discovery requirement.
+    /// </summary>
+    public bool ConfiguresIdentity => Model.PreserveIdentity.HasValue ||
+                                      Model.Members.Any(static member => member.PreserveIdentity.HasValue);
+
+    /// <summary>
+    /// Reasons why this generated graph cannot carry one tracking state across everything it deep
+    /// clones. Empty means the graph can honor an explicit identity-preserving operation. Populated
+    /// while the body is generated, so the decision uses the same analysis that emits the code.
+    /// </summary>
+    public List<string> RuntimeBoundaryReasons { get; } = [];
+
+    public void RecordRuntimeBoundary(string reason)
+    {
+        if (!RuntimeBoundaryReasons.Contains(reason))
+        {
+            RuntimeBoundaryReasons.Add(reason);
+        }
+    }
+
     public bool IsFastClonerAvailable { get; }
     public TargetFramework TargetFramework { get; }
     public BridgeContract BridgeContract { get; }

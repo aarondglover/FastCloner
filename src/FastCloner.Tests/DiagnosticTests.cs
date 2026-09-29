@@ -808,6 +808,177 @@ public class PolySub : PolyRoot
 
     #endregion
 
+    #region PreserveIdentity capability diagnostics (FCG013 / FCG014)
+
+    private const string DiscoverySurfacePrefix = """
+        #nullable enable
+        using System.Collections.Generic;
+        using FastCloner.SourceGenerator.Shared;
+
+        namespace TestNamespace;
+
+        """;
+
+    /// <summary>
+    /// A root required by <c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c> whose
+    /// graph necessarily delegates part of itself to the runtime cloner cannot serve a graph-wide
+    /// identity-preserving operation. That has to be an error rather than a silent best-effort
+    /// implementation, because the requirement is what the caller is relying on.
+    /// </summary>
+    [Test]
+    public async Task CapabilityRequiredRootWithRuntimeResolvedMember_ShouldReportFCG013()
+    {
+        const string source = DiscoverySurfacePrefix + """
+
+            public class Form
+            {
+                public object? Payload { get; set; }
+            }
+
+            [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+            public interface ISurface<T>
+            {
+            }
+
+            public class Consumer
+            {
+                public ISurface<Form>? Surface { get; set; }
+            }
+            """;
+
+        (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
+
+        Diagnostic[] required = [.. generatorDiags.Where(d => d.Id == "FCG013")];
+
+        await Assert.That(required.Length).IsEqualTo(1)
+            .Because("the required capability cannot be supplied: " +
+                     string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
+        await Assert.That(required[0].Severity).IsEqualTo(DiagnosticSeverity.Error);
+        await Assert.That(required[0].GetMessage()).Contains("PreserveIdentity");
+        await Assert.That(required[0].GetMessage()).Contains("not generated");
+    }
+
+    /// <summary>
+    /// The same requirement over a graph the generator fully models must produce no diagnostics, an
+    /// operation-level entry point, and no delegation to the runtime cloner anywhere in the file.
+    /// </summary>
+    [Test]
+    public async Task CapabilityRequiredRootWithModelledGraph_ShouldGenerateWithoutRuntimeEscapePath()
+    {
+        const string source = DiscoverySurfacePrefix + """
+
+            public class Node
+            {
+                public int Value { get; set; }
+            }
+
+            public class Root
+            {
+                public string Name { get; set; } = string.Empty;
+                public Node? Left { get; set; }
+                public Node? Right { get; set; }
+                public List<Node> Items { get; set; } = new();
+            }
+
+            [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
+            public interface ISurface<T>
+            {
+            }
+
+            public class Consumer
+            {
+                public ISurface<Root>? Surface { get; set; }
+            }
+            """;
+
+        (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
+
+        await Assert.That(generatorDiags.Where(d => d.Id is "FCG013" or "FCG014")).IsEmpty()
+            .Because("the graph can carry one tracking state: " +
+                     string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string rootFile = generated.Single(g => g.HintName == "TestNamespace_Root_FastDeepClone.g.cs").Text;
+
+        await Assert.That(rootFile).Contains("FastCloneOptions options")
+            .Because("the operation-level entry point is what makes the requirement usable");
+        await Assert.That(rootFile).DoesNotContain("FastCloner.DeepClone(")
+            .Because("no part of a supported preserving operation may be handed to the runtime cloner");
+    }
+
+    /// <summary>
+    /// A root that never asked for identity preservation keeps its surface and its diagnostics
+    /// untouched: the runtime fallback for its unmodellable member is existing behavior.
+    /// </summary>
+    [Test]
+    public async Task OrdinaryRootWithRuntimeResolvedMember_ShouldNotReportBoundaryDiagnostics()
+    {
+        const string source = """
+            #nullable enable
+            using FastCloner.SourceGenerator.Shared;
+
+            namespace TestNamespace;
+
+            [FastClonerClonable]
+            public class Plain
+            {
+                public object? Payload { get; set; }
+            }
+            """;
+
+        (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
+
+        await Assert.That(generatorDiags.Where(d => d.Id is "FCG013" or "FCG014")).IsEmpty()
+            .Because("a root that never requested the capability must not gain new diagnostics: " +
+                     string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string file = generated.Single(g => g.HintName == "TestNamespace_Plain_FastDeepClone.g.cs").Text;
+
+        await Assert.That(file).DoesNotContain("FastCloneOptions options")
+            .Because("the operation cannot be guaranteed here, so it is not offered");
+        await Assert.That(file).Contains("FastCloner.DeepClone(")
+            .Because("the existing runtime fallback behavior of ordinary roots is unchanged");
+    }
+
+    /// <summary>
+    /// A type that configures identity itself does want the guarantee, so it is told (as a warning
+    /// rather than an error, because the runtime fallback for its member is pre-existing behavior)
+    /// why the operation-level entry point is not offered.
+    /// </summary>
+    [Test]
+    public async Task IdentityConfiguredRootWithRuntimeResolvedMember_ShouldReportFCG014()
+    {
+        const string source = """
+            #nullable enable
+            using FastCloner.SourceGenerator.Shared;
+
+            namespace TestNamespace;
+
+            [FastClonerClonable]
+            [FastClonerPreserveIdentity]
+            public class Configured
+            {
+                public object? Payload { get; set; }
+            }
+            """;
+
+        (ImmutableArray<Diagnostic> generatorDiags, ImmutableArray<Diagnostic> _) = RunGeneratorAndCompile(source);
+
+        Diagnostic[] warnings = [.. generatorDiags.Where(d => d.Id == "FCG014")];
+
+        await Assert.That(warnings.Length).IsEqualTo(1)
+            .Because(string.Join("; ", generatorDiags.Select(d => $"{d.Id}:{d.GetMessage()}")));
+        await Assert.That(warnings[0].Severity).IsEqualTo(DiagnosticSeverity.Warning);
+
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string file = generated.Single(g => g.HintName == "TestNamespace_Configured_FastDeepClone.g.cs").Text;
+
+        await Assert.That(file).DoesNotContain("FastCloneOptions options");
+    }
+
+    #endregion
+
     // Helper method to run the generator (returns only generator diagnostics)
     private static ImmutableArray<Diagnostic> RunGenerator(string source)
     {

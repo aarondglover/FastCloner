@@ -149,40 +149,60 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         // Types that must be able to honor a supplied tracking state: those that configure identity
         // (or were discovered with the requirement), plus everything their generated graphs clone
         // through another generated file. Keeping the closure here means a preserving operation does
-        // not silently stop at a file boundary.
-        IncrementalValueProvider<EquatableArray<string>> identityPreservationRequirements = pipeline.Collect()
+        // not silently stop at a file boundary. Requirements coming from a PreserveIdentity = true
+        // discovery surface are tracked separately, because those must either be served or reported.
+        IncrementalValueProvider<IdentityRequirementSet> identityRequirements = pipeline.Collect()
             .Combine(discoveryResult)
-            .Select(static (pair, _) => IdentityCapabilityRequirements.Expand(pair.Left, pair.Right));
+            .Combine(usagePipeline)
+            .Select(static (pair, _) => IdentityCapabilityRequirements.Expand(pair.Left.Left, pair.Left.Right, pair.Right));
 
         IncrementalValuesProvider<Result<TypeModel>> pipelineWithCapability = pipeline
-            .Combine(identityPreservationRequirements)
+            .Combine(identityRequirements)
             .Select(static (pair, _) =>
             {
-                (Result<TypeModel> result, EquatableArray<string> requirements) = pair;
+                (Result<TypeModel> result, IdentityRequirementSet requirements) = pair;
 
-                if (!result.IsSuccess || result.Value is not TypeModel model || requirements.Count == 0)
+                if (!result.IsSuccess || result.Value is not TypeModel model)
                     return result;
 
-                if (!requirements.Contains(model.FullyQualifiedName))
+                bool required = requirements.Required.Contains(model.FullyQualifiedName);
+
+                if (!required && !requirements.Capability.Contains(model.FullyQualifiedName))
                     return result;
 
-                return Result<TypeModel>.Success(model with { SupportsStateTracking = true });
+                return Result<TypeModel>.Success(model with
+                {
+                    SupportsStateTracking = true,
+                    IdentityPreservationRequired = model.IdentityPreservationRequired || required
+                });
             });
 
         IncrementalValuesProvider<DiscoveredGenericRoot> discoveredRoots = discoveryResult
             .SelectMany(static (result, _) => result.Roots)
-            .Combine(identityPreservationRequirements)
+            .Combine(identityRequirements)
             .Select(static (pair, _) =>
             {
-                (DiscoveredGenericRoot root, EquatableArray<string> requirements) = pair;
+                (DiscoveredGenericRoot root, IdentityRequirementSet requirements) = pair;
 
-                if (root.Model is not TypeModel model || requirements.Count == 0)
+                if (root.Model is not TypeModel model)
                     return root;
 
-                if (model.SupportsStateTracking || !requirements.Contains(model.FullyQualifiedName))
+                bool required = requirements.Required.Contains(model.FullyQualifiedName);
+
+                if (model.SupportsStateTracking &&
+                    (!required || model.IdentityPreservationRequired))
+                {
+                    return root;
+                }
+
+                if (!required && !requirements.Capability.Contains(model.FullyQualifiedName))
                     return root;
 
-                return new DiscoveredGenericRoot(model with { SupportsStateTracking = true });
+                return new DiscoveredGenericRoot(model with
+                {
+                    SupportsStateTracking = true,
+                    IdentityPreservationRequired = model.IdentityPreservationRequired || required
+                });
             });
 
         IncrementalValuesProvider<(((DiscoveredGenericRoot Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> discoveryPipeline =

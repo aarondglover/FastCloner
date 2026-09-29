@@ -97,7 +97,8 @@ internal static class GenericTypeAnalyzer
                 new EquatableArray<MemberModel>(nestedTypes.Values.ToArray()),
                 new EquatableArray<TypeModel>(implicitTypes.Values.ToArray()),
                 isSafe,
-                isClonable
+                isClonable,
+                SymbolEqualityComparer.Default.Equals(typeArg.ContainingAssembly, compilation.Assembly)
             );
         }
 

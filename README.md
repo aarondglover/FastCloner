@@ -324,18 +324,23 @@ root.FastDeepClone();                                  // member default: no tra
 root.FastDeepClone(FastCloneOptions.PreserveIdentity); // Nodes[0] == Nodes[1]
 ```
 
-A root exposes `FastDeepClone(FastCloneOptions)` when it can honor the request:
+A root exposes `FastDeepClone(FastCloneOptions)` only when the generator can prove the call against its graph:
 a type discovered through a surface declaring `PreserveIdentity = true`, or a type that configures identity
-itself with `[FastClonerPreserveIdentity]`. Anywhere else the overload is not generated, so `FastDeepClone()`
-stays on its existing fast path and a caller cannot silently receive a clone that ignores the requirement.
+itself with `[FastClonerPreserveIdentity]` — **and** no part of the graph necessarily delegating to the runtime
+cloner. Anywhere else the overload is not generated, so `FastDeepClone()` stays on its existing fast path and a
+caller cannot silently receive a clone that ignores the requirement. The contract is therefore unconditional
+wherever it compiles:
 
-> **Note**: the generated capability covers everything the generated graph clones. Members that FastCloner
-> delegates to the runtime cloner (custom handlers, `object`-typed members, types the generator cannot model)
-> are cloned with the runtime's own tracking state, so an object shared between a generated path and a
-> runtime-delegated path can still end up cloned twice. That boundary is documented and pinned by a test rather
-> than advertised as guaranteed; see
-> [the design notes](docs/design/generic-argument-discovery.md#generatedruntime-boundary-reported-options-listed-not-fixed-here)
-> for the options to close it.
+> `value.FastDeepClone(FastCloneOptions.PreserveIdentity)` preserves reference topology across everything that
+> operation actually deep clones.
+
+> **Note**: when a requirement or a configured identity cannot actually be served — because a member is resolved
+> at runtime (`object`, a type the generator cannot model) or the whole type falls back to the runtime cloner — the
+> generator says so instead of emitting a best-effort implementation: `FCG013` (error) for a requirement coming
+> from a `PreserveIdentity = true` discovery surface, `FCG014` (warning) for a type that configures identity
+> itself. Roots that never asked for identity preservation are unaffected and keep their existing generated output.
+> See [the design notes](docs/design/generic-argument-discovery.md#generatedruntime-boundary) for the full boundary
+> inventory and for the runtime-state bridge that would close the remaining cases.
 
 ### Custom Cloning Context
 
@@ -519,9 +524,12 @@ Document shared = doc.FastDeepClone(FastCloneOptions.PreserveIdentity); // this 
 The option describes what *this* invocation requires; it never changes the type's configured default and no
 second clone implementation is generated. It is also the strongest identity requirement for that call: member
 and type level `[FastClonerPreserveIdentity(false)]` values are defaults for the ordinary call and do not weaken
-it. The overload exists for roots that declare the capability — a type with `[FastClonerPreserveIdentity]`, or a
-type discovered through `[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`. Elsewhere the call does
-not compile rather than quietly returning an untracked clone.
+it. The overload exists only for roots where the generator can prove the guarantee — a type with
+`[FastClonerPreserveIdentity]`, or a type discovered through
+`[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`, whose graph does not necessarily delegate to the
+runtime cloner. Elsewhere the call does not compile rather than quietly returning an untracked clone, and a
+requirement that cannot be served is reported as `FCG013` (see
+[Generic argument discovery](#generic-argument-discovery)).
 
 ## Limitations
 

@@ -32,6 +32,16 @@ internal sealed class CloneCodeGenerator
     
     public IReadOnlyList<string> SkippedNonPublicMembers => _context.SkippedNonPublicMembers;
 
+    /// <summary>
+    /// Reasons why an explicit identity-preserving operation cannot be guaranteed for this root
+    /// (empty when the generated graph can carry one tracking state).
+    /// </summary>
+    public IReadOnlyList<string> RuntimeBoundaryReasons => _context.RuntimeBoundaryReasons;
+
+    public bool IdentityPreservationRequired => _context.IdentityPreservationRequired;
+
+    public bool ConfiguresIdentity => _context.ConfiguresIdentity;
+
     private void PreAnalyzeHelperUsages()
     {
         AnalyzeMembers(_context.Model.Members);
@@ -41,6 +51,33 @@ internal sealed class CloneCodeGenerator
             foreach (TypeModel? related in _context.Model.RelatedTypes)
             {
                 AnalyzeMembers(related.Members);
+            }
+        }
+
+        // A collection of the root's own type parameter is cloned through the generated Cloner<T>
+        // helper. That class is written before the collection helpers exist, so the decision has to
+        // be taken here. Only the decision is taken here: the helper usage counts above stay exactly
+        // as they were, so inlining behavior is unaffected.
+        DetectSoleTypeParameterClonerUsages(_context.Model.Members);
+        DetectSoleTypeParameterClonerUsages(_context.Model.NestedTypes);
+
+        if (_context.Model.RelatedTypes != null)
+        {
+            foreach (TypeModel? related in _context.Model.RelatedTypes)
+            {
+                DetectSoleTypeParameterClonerUsages(related.Members);
+                DetectSoleTypeParameterClonerUsages(related.NestedTypes);
+            }
+        }
+    }
+
+    private void DetectSoleTypeParameterClonerUsages(IEnumerable<MemberModel> members)
+    {
+        foreach (MemberModel member in members)
+        {
+            if (_context.Model.UsesSoleTypeParameterCloner(member))
+            {
+                _context.NeedsClonerClass = true;
             }
         }
     }
@@ -143,7 +180,6 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine("    {");
         
         WritePublicFastDeepCloneMethod(typeName, fullTypeName);
-        WritePublicFastDeepCloneWithOptionsMethod(typeName);
         WritePrivateFastDeepCloneMethod(typeName, fullTypeName);
         WriteDerivedTypeHelpers();
         WriteClonerClass();
@@ -151,6 +187,11 @@ internal sealed class CloneCodeGenerator
         CollectionHelperGenerator.GenerateHelpers(_context);
         
         EmitNonPublicAccessorBlock(sb);
+
+        // Emitted last: whether the operation-level entry point may be offered at all depends on
+        // whether generating the rest of the file found a part of the graph that necessarily
+        // delegates to the runtime cloner (and therefore cannot carry the supplied state).
+        WritePublicFastDeepCloneWithOptionsMethod(typeName);
 
         sb.AppendLine("    }");
     }
@@ -205,6 +246,11 @@ internal sealed class CloneCodeGenerator
 
         if (!_context.Model.IsRefLikeType && _context.IsFastClonerAvailable && (hasInitOnlyWithCycles || structWithReadonlyRefs))
         {
+             _context.RecordRuntimeBoundary(
+                 "the whole type is cloned by the runtime cloner because of " +
+                 (hasInitOnlyWithCycles
+                     ? "init-only members combined with circular reference tracking"
+                     : "readonly reference fields in a struct"));
              sb.AppendLine($"            return {CloneGeneratorContext.FastClonerDeepCloneCall("source")};");
              sb.AppendLine("        }");
              sb.AppendLine();
@@ -247,10 +293,15 @@ internal sealed class CloneCodeGenerator
     /// Emits the operation-level entry point that can positively require identity preservation for a
     /// single call. The default entry point above keeps its existing behavior and fast path: a
     /// tracking state is only allocated when the caller asks for it, so ordinary calls pay nothing.
+    /// <br/><br/>
+    /// The entry point is only offered when generating the rest of the file proved the graph can
+    /// carry one tracking state across everything it deep clones. If some part of the graph
+    /// necessarily delegates to the runtime cloner (which runs its own state), the call is not
+    /// offered at all: a caller cannot silently receive a clone that ignores the requirement.
     /// </summary>
     private void WritePublicFastDeepCloneWithOptionsMethod(string typeName)
     {
-        if (!_context.StateCapable)
+        if (!_context.StateCapable || _context.RuntimeBoundaryReasons.Count > 0)
             return;
 
         StringBuilder sb = _context.Source;
@@ -270,9 +321,9 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine($"        /// {GeneratedTypeNames.FastCloneOptions}.PreserveIdentity requires reference topology");
         sb.AppendLine($"        /// preservation for this call regardless of the type's default. Without it the call is");
         sb.AppendLine($"        /// identical to FastDeepClone(source), so the type's default behavior is never changed.");
-        sb.AppendLine($"        /// The guarantee covers every part of the graph this generated implementation clones");
-        sb.AppendLine($"        /// itself; members the generator has no model for are handed to the runtime cloner,");
-        sb.AppendLine($"        /// which runs its own tracking state, so preservation is best effort from there on.");
+        sb.AppendLine($"        /// This overload is only generated when the whole graph this implementation clones can");
+        sb.AppendLine($"        /// be carried by one tracking state, so the guarantee covers everything actually");
+        sb.AppendLine($"        /// deep cloned by the operation.");
         sb.AppendLine($"        /// </remarks>");
 
         string notNullAttr = CloneGeneratorContext.NotNullIfNotNullAttr(_context.Model.CodeAnalysisAvailable && !isStruct);
@@ -316,6 +367,11 @@ internal sealed class CloneCodeGenerator
         
         if (!_context.Model.IsRefLikeType && _context.IsFastClonerAvailable && (hasInitOnlyWithCycles || structWithReadonlyRefs))
         {
+             _context.RecordRuntimeBoundary(
+                 "the whole type is cloned by the runtime cloner because of " +
+                 (hasInitOnlyWithCycles
+                     ? "init-only members combined with circular reference tracking"
+                     : "readonly reference fields in a struct"));
              sb.AppendLine("            // Fallback to runtime cloning due to complex language features.");
              sb.AppendLine("            // Note: State is ignored here as the runtime handles its own circular reference tracking.");
              sb.AppendLine($"            return {CloneGeneratorContext.FastClonerDeepCloneCall("source")};");
@@ -409,6 +465,8 @@ internal sealed class CloneCodeGenerator
 
         if (_context.IsFastClonerAvailable)
         {
+            _context.RecordRuntimeBoundary(
+                "an unknown derived type of '" + _context.Model.Name + "' is cloned by the runtime cloner, which cannot be given the generated state");
             sb.AppendLine($"            return ({typeName}){CloneGeneratorContext.FastClonerDeepCloneCall("source")}!;");
         }
         else
@@ -478,6 +536,8 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine("            {");
         if (_context.IsFastClonerAvailable)
         {
+            _context.RecordRuntimeBoundary(
+                "an unknown derived type of '" + _context.Model.Name + "' is cloned by the runtime cloner, which cannot be given the generated state");
             sb.AppendLine($"                return ({typeName}){CloneGeneratorContext.FastClonerDeepCloneCall("source")}!;");
         }
         else
@@ -845,7 +905,20 @@ internal sealed class CloneCodeGenerator
             else if (usage.IsClonable && !string.IsNullOrEmpty(usage.ExtensionClassFQN))
             {
                 sb.AppendLine($"                if (typeof({castTypeParam}) == typeof({argType}))");
-                sb.AppendLine($"                    return ({castTypeParam})(object)({usage.ExtensionClassFQN}.FastDeepClone(({argType})(object)source)!);");
+
+                if (usage.IsDeclaredInCompilation)
+                {
+                    sb.AppendLine($"                    return ({castTypeParam})(object){usage.ExtensionClassFQN}.InternalFastDeepClone(({argType})(object)source, state)!;");
+                }
+                else
+                {
+                    // The argument's own generated entry point lives in another assembly, where
+                    // InternalFastDeepClone is internal. The public entry point starts a fresh
+                    // tracking state, so the operation cannot be guaranteed across that boundary.
+                    _context.RecordRuntimeBoundary(
+                        $"'{argType}' is a clonable type from a referenced assembly, whose state-aware entry point is not accessible");
+                    sb.AppendLine($"                    return ({castTypeParam})(object)({usage.ExtensionClassFQN}.FastDeepClone(({argType})(object)source)!);");
+                }
             }
             else if (usage.CollectionModel != null)
             {
@@ -882,6 +955,15 @@ internal sealed class CloneCodeGenerator
         
         if (_context.IsFastClonerAvailable)
         {
+            // Any closed argument that matches none of the branches above is cloned by the runtime
+            // with its own tracking state. Only worth recording separately for generic roots: for a
+            // closed type the member-level reason already names the offending member.
+            if (_context.Model.TypeParameters.Count > 0)
+            {
+                _context.RecordRuntimeBoundary(
+                    "a generic member is cloned by the runtime cloner ('Cloner<T>' fallback) because its closed type has no generated model");
+            }
+
             sb.AppendLine($"                return ({fallbackCastTypeParam}){CloneGeneratorContext.FastClonerDeepCloneCall("source")}!;");
         }
         else

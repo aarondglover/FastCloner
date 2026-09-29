@@ -83,6 +83,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
+                        context.RecordRuntimeBoundary(
+                            $"the member '{member.Name}' of type '{member.TypeFullName}' is resolved at runtime, so the generated state cannot cover it");
                         // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
                         return $"{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}!, {context.GetMemberStateArgument(member, stateVar)}){nf}";
                 }
@@ -229,6 +231,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
+                        context.RecordRuntimeBoundary(
+                            $"the member '{member.Name}' of type '{member.TypeFullName}' is resolved at runtime, so the generated state cannot cover it");
                         // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
                         sb.AppendLine($"            {resultVar}.{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}!, {context.GetMemberStateArgument(member, stateVar)}){nf};");
                         break;

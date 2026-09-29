@@ -79,6 +79,53 @@ internal static class CloneRootEmitter
                     skippedList));
             }
 
+            // The operation-level entry point is withheld when generating the file found a part of the
+            // graph that necessarily delegates to the runtime cloner. That is correct rather than
+            // silent: a caller cannot obtain a clone that would ignore the requirement. When identity
+            // preservation was requested - required by a discovery surface, or configured by the type
+            // itself - say why the operation is missing instead of leaving it to guesswork.
+            if (generator.RuntimeBoundaryReasons.Count > 0 &&
+                (generator.IdentityPreservationRequired || generator.ConfiguresIdentity))
+            {
+                string reasons = string.Join("; ", generator.RuntimeBoundaryReasons);
+
+                if (generator.IdentityPreservationRequired)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        new DiagnosticDescriptor(
+                            "FCG013",
+                            "Identity preservation cannot be guaranteed for a required capability",
+                            "'[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]' requires type '{0}' to serve " +
+                            "FastDeepClone(FastCloneOptions.PreserveIdentity), but part of its graph is necessarily cloned by the " +
+                            "runtime cloner, which runs its own tracking state: {1}. " +
+                            "The operation-level overload is therefore not generated for '{0}'. " +
+                            "Make the listed members use a type the generator can clone (a concrete clonable or implicitly clonable type).",
+                            "FastCloner",
+                            DiagnosticSeverity.Error,
+                            isEnabledByDefault: true),
+                        Location.None,
+                        model.Name,
+                        reasons));
+                }
+                else
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        new DiagnosticDescriptor(
+                            "FCG014",
+                            "Identity preservation cannot be guaranteed for the generated operation",
+                            "Type '{0}' configures identity preservation, but part of its graph is necessarily cloned by the runtime " +
+                            "cloner, which runs its own tracking state: {1}. " +
+                            "FastDeepClone(FastCloneOptions.PreserveIdentity) is not generated for '{0}' because the guarantee " +
+                            "cannot be met; the configured default behavior of FastDeepClone() is unchanged.",
+                            "FastCloner",
+                            DiagnosticSeverity.Warning,
+                            isEnabledByDefault: true),
+                        Location.None,
+                        model.Name,
+                        reasons));
+                }
+            }
+
             context.AddSource(GetHintName(model), SourceText.From(generatedSource, Encoding.UTF8));
         }
         catch (System.Exception ex)

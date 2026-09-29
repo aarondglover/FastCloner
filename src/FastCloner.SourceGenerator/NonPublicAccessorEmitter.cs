@@ -215,13 +215,13 @@ internal static class NonPublicAccessorEmitter
             string structFqn = context.Model.FullyQualifiedName;
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    object {boxVar} = (object){resultVar};");
-            WriteRuntimeBridgeCallStatement(sb, indent + "    ", proxyFqn, accessorPrefix, accessor, member, sourceVar, boxVar);
+            WriteRuntimeBridgeCallStatement(sb, indent + "    ", proxyFqn, accessorPrefix, accessor, member, sourceVar, boxVar, context);
             sb.AppendLine($"{indent}    {resultVar} = ({structFqn}){boxVar};");
             sb.AppendLine($"{indent}}}");
         }
         else
         {
-            WriteRuntimeBridgeCallStatement(sb, indent, proxyFqn, accessorPrefix, accessor, member, sourceVar, resultVar);
+            WriteRuntimeBridgeCallStatement(sb, indent, proxyFqn, accessorPrefix, accessor, member, sourceVar, resultVar, context);
         }
     }
 
@@ -233,8 +233,12 @@ internal static class NonPublicAccessorEmitter
         NonPublicAccessor accessor,
         MemberModel member,
         string sourceVar,
-        string targetVar)
+        string targetVar,
+        CloneGeneratorContext? context = null)
     {
+        context?.RecordRuntimeBoundary(
+            $"the non-public member '{accessor.MemberName}' is cloned through the reflection bridge, which runs the runtime cloner's own tracking state");
+
         if (accessor.IsBackingFieldStorage)
         {
             string fiRef = $"{accessorPrefix}{accessor.AccessorMethodName}_FI";
@@ -262,14 +266,46 @@ internal static class NonPublicAccessorEmitter
 
             case MemberTypeKind.Clonable:
                 return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {context.GetMemberStateArgument(member, stateVar)})!";
-            
-            default:
-                if (context.IsFastClonerAvailable)
+
+            case MemberTypeKind.Implicit:
+            {
+                // A non-public member still has to take part in the enclosing tracking state, so it
+                // is cloned by this file's implicit helper rather than handed to the runtime cloner.
+                if (context.TryGetImplicitTypeModel(member.TypeFullName, out TypeModel implicitModel))
                 {
-                    return $"({member.TypeFullName})({CloneGeneratorContext.FastClonerDeepCloneCall(readExpression)}!)";
+                    string helperName = context.GetOrCreateHelperMethodName(member);
+                    bool implicitNeedsState = context.ImplicitHelperNeedsState(implicitModel);
+                    string implicitStateVar = implicitNeedsState
+                        ? context.GetMemberStateArgument(member, stateVar)
+                        : "null";
+
+                    return CollectionHelperGenerator.GetHelperMethodCall(context, helperName, readExpression, implicitNeedsState, implicitStateVar);
                 }
-                return $"{readExpression}!";
+
+                break;
+            }
+
+            case MemberTypeKind.Collection:
+            case MemberTypeKind.Dictionary:
+            case MemberTypeKind.Array:
+            case MemberTypeKind.MultiDimArray:
+            {
+                string helperName = context.GetOrCreateHelperMethodName(member);
+                bool needsState = context.MemberCanTrack(member);
+                string actualStateVar = context.GetMemberStateArgument(member, stateVar);
+
+                return CollectionHelperGenerator.GetHelperMethodCall(context, helperName, readExpression, needsState, actualStateVar);
+            }
         }
+
+        if (context.IsFastClonerAvailable)
+        {
+            context.RecordRuntimeBoundary(
+                $"the non-public member '{member.Name}' of type '{member.TypeFullName}' has no generated model, so it is cloned by the runtime cloner");
+            return $"({member.TypeFullName})({CloneGeneratorContext.FastClonerDeepCloneCall(readExpression)}!)";
+        }
+
+        return $"{readExpression}!";
     }
 
     private static string Sanitize(string name)
