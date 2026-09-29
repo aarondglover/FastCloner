@@ -7,6 +7,12 @@ namespace FastCloner.SourceGenerator;
 
 internal static class TypeModelFactory
 {
+    /// <param name="preserveIdentityOverride">
+    /// Identity preservation requested by the declaration that discovered this type
+    /// (<c>[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]</c>). Ignored when the
+    /// type carries its own <c>[FastClonerPreserveIdentity]</c> attribute, which is the more
+    /// specific declaration.
+    /// </param>
     public static bool TryCreate(
         INamedTypeSymbol symbol,
         bool nullabilityEnabled,
@@ -14,7 +20,8 @@ internal static class TypeModelFactory
         TargetFramework targetFramework,
         ExternalIgnoreRegistry externalIgnores,
         out TypeModel? model,
-        out Diagnostic? error)
+        out Diagnostic? error,
+        bool? preserveIdentityOverride = null)
     {
         model = null;
         error = null;
@@ -33,7 +40,7 @@ internal static class TypeModelFactory
                                  !symbol.IsAbstract &&
                                  !symbol.IsSealed &&
                                  !symbol.IsValueType;
-        bool? preserveIdentity = GetPreserveIdentityFromType(symbol);
+        bool? preserveIdentity = GetPreserveIdentityFromType(symbol) ?? preserveIdentityOverride;
         bool codeAnalysisAvailable = compilation.GetTypeByMetadataName("System.Diagnostics.CodeAnalysis.NotNullIfNotNullAttribute") != null;
         
         if (hasSimulateNoRuntime)
@@ -213,6 +220,13 @@ internal static class TypeModelFactory
             }
         }
 
+        // Identity preservation is requested for this type's subgraph, and implicitly cloned
+        // member types are part of that subgraph. A reference-typed implicit model without state
+        // tracking clones once per reference, which loses shared identity — the runtime cloner
+        // preserves it, so honoring the attribute requires the state slot here.
+        if (preserveIdentity == true)
+            PromoteIdentityTracking(relatedTypes);
+
         List<string> circRefLog = [];
         StateRequirementAnalyzer.AnalysisResult stateAnalysis = StateRequirementAnalyzer.Analyze(symbol, compilation, circRefLog, preserveIdentity);
         bool canHaveCircularRefs = stateAnalysis.HasCircularRefs;
@@ -274,6 +288,21 @@ internal static class TypeModelFactory
         return true;
     }
     
+    private static void PromoteIdentityTracking(Dictionary<string, TypeModel> relatedTypes)
+    {
+        foreach (string key in relatedTypes.Keys.ToList())
+        {
+            TypeModel related = relatedTypes[key];
+
+            // Structs have value semantics: a distinct copy per occurrence is correct, not an
+            // identity violation, and boxing them into the state map would be wrong.
+            if (related.IsStruct || related.NeedsStateTracking)
+                continue;
+
+            relatedTypes[key] = related with { NeedsStateTracking = true };
+        }
+    }
+
     private static bool? GetPreserveIdentityFromType(INamedTypeSymbol symbol)
     {
         foreach (AttributeData attr in symbol.GetAttributes())
