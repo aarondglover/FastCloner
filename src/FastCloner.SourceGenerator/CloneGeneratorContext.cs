@@ -157,6 +157,13 @@ internal sealed class CloneGeneratorContext
     /// </summary>
     public static string PreservingOperationState(string stateVar, string fallback)
     {
+        // A state that is already the non-tracking expression cannot be a preserving operation, so
+        // the conditional would degenerate into a tautology that only adds noise to generated code.
+        if (stateVar == fallback)
+        {
+            return fallback;
+        }
+
         return $"{stateVar} is {{ IsPreservingOperation: true }} ? {stateVar} : {fallback}";
     }
 

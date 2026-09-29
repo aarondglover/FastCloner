@@ -415,15 +415,6 @@ public class FastCloneOptionsTests
 
     #region Precedence: an explicit operation beats an opt-out over a preserving child type
 
-    /// <summary>
-    /// A preserving discovery surface: naming a root here is what makes it expose the operation-level
-    /// overload.
-    /// </summary>
-    [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
-    public interface IPreservingSurface<T>
-    {
-    }
-
     public class PreservingLeaf
     {
         public int Value { get; set; }
@@ -471,6 +462,55 @@ public class FastCloneOptionsTests
             .Because("an explicit operation-level PreserveIdentity wins over the member-level opt-out");
         await Assert.That(preserving.Child.First).IsNotSameReferenceAs(shared);
         await Assert.That(preserving.Child.First!.Value).IsEqualTo(17);
+    }
+
+    #endregion
+
+    #region Cycles reached through an opted-out edge
+
+    public class CycleLeaf
+    {
+        public int Value { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class CycleChild
+    {
+        public CycleLeaf? Item { get; set; }
+        public CycleChild? Next { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class MemberOptOutOverCycleRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public CycleChild? Child { get; set; }
+    }
+
+    /// <summary>
+    /// Cycle continuity must survive both the opt-out and the explicit operation: an opted-out edge
+    /// may suppress aliasing, but it must never discard the reference map that is closing the cycle
+    /// it sits on.
+    /// </summary>
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task MemberOptOut_OverACycle_ShouldKeepCycleDetectionUnderAnExplicitOperation()
+    {
+        IPreservingSurface<MemberOptOutOverCycleRoot>? surface = null;
+        await Assert.That(surface).IsNull();
+
+        CycleChild child = new() { Item = new CycleLeaf { Value = 3 } };
+        child.Next = child;
+        MemberOptOutOverCycleRoot original = new() { Child = child };
+
+        MemberOptOutOverCycleRoot ordinary = original.FastDeepClone();
+        await Assert.That(ordinary.Child!.Next).IsSameReferenceAs(ordinary.Child)
+            .Because("cycle continuity takes precedence over the opt-out, exactly as before");
+
+        MemberOptOutOverCycleRoot preserving = original.FastDeepClone(FastCloneOptions.PreserveIdentity);
+        await Assert.That(preserving.Child!.Next).IsSameReferenceAs(preserving.Child)
+            .Because("the preserving state must stay coherent across a cycle reached through an opted-out edge");
+        await Assert.That(preserving.Child.Item!.Value).IsEqualTo(3);
     }
 
     #endregion
