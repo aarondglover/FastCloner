@@ -159,7 +159,7 @@ public sealed class FastClonerDiscoverGenericArgumentsAttribute : Attribute
 }
 ```
 
-The exact public shape is subject to upstream maintainer preference.
+This is the initial proposed public shape for implementation.
 
 ## Design constraints
 
@@ -211,7 +211,3 @@ Tests should cover at least:
 - `PreserveIdentity = true` preserving shared-reference topology;
 - default discovery retaining existing identity behavior;
 - referenced-assembly declarations acting as discovery points from a consuming compilation.
-
-## Status
-
-Design proposal only. Implementation should wait for upstream feedback on whether this capability and public API shape fit FastCloner's direction.
