@@ -142,6 +142,18 @@ The clone is detached from the source graph, while repeated references to the sa
 
 `PreserveIdentity = false` is the default and retains FastCloner's current default behavior.
 
+The declaration is satisfied by an explicit operation-level request for identity preservation, so the discovered
+type's own default cloning behavior is untouched:
+
+```csharp
+value.FastDeepClone();                                   // unchanged default behavior
+value.FastDeepClone(FastCloneOptions.PreserveIdentity);  // A' ──► B' ◄── C'
+```
+
+See the implementation notes below for the capability model, and for the two pre-existing limitations that the
+guarantee inherits from the existing machinery (member-level negative overrides, and members delegated to the
+runtime cloner).
+
 ## Proposed attribute surface
 
 Initial target set:
@@ -251,29 +263,96 @@ non-generic type. Consequences, in the order the collector applies them:
   ARGUMENTS cannot be roots themselves because a closed construction keeps the definition's type parameters
   (`Wrapper<Order>` still reports `T`), so an entry point generated for it would declare an unusable type
   parameter at every call site;
-- a type that already carries `[FastClonerClonable]` is skipped: its own pipeline already emitted the entry
-  point, and a second one would be a duplicate member of the same extension class;
+- a type that already carries `[FastClonerClonable]` is not rooted again: its own pipeline already emitted the
+  entry point, and a second one would be a duplicate member of the same extension class. If the discovering
+  surface requires identity preservation, the requirement is carried into that existing root instead;
 - types declared in another assembly are rooted only when the generator would already clone them implicitly
   (public parameterless constructor). Emitting member-wise cloners for arbitrary foreign types (e.g. `HttpClient`)
   would depend on state the generator cannot access, and would turn an innocuous usage into a build break.
 
-Roots are deduplicated by fully qualified name; when the same type is reached through several surfaces, the
-identity-preserving model wins because identity is a property of the discovered type rather than of whichever
-surface discovered it first.
+Roots are deduplicated by fully qualified name and the capability requirement is OR-ed, so no surface wins over
+another and the type's default behavior is identical however many surfaces discovered it.
 
 ### Identity preservation
 
-`PreserveIdentity = true` feeds `true` through `TypeModelFactory`/`StateRequirementAnalyzer`, i.e. exactly the
-`[FastClonerPreserveIdentity]` path. One gap surfaced: an implicitly cloned member type whose own members are all
-safe types kept `NeedsStateTracking = false`, so it was cloned once per reference and shared identity was lost —
-while the runtime cloner preserved it. Since identity preservation is useless without that, the implicit models
-of a preserving root now get a state slot (`TypeModelFactory.PromoteIdentityTracking`). The change is inert
-unless the root asks for identity preservation, and it closes a generated/runtime behavioral difference.
+`PreserveIdentity` on a discovery surface is a **capability requirement**, not a behavior change:
+
+> Types discovered through this surface must have generated cloning capability compatible with an operation
+> requiring identity preservation.
+
+It must not mean "change the type's default `FastDeepClone()` behavior". The implementation therefore feeds a
+capability flag (`TypeModel.SupportsStateTracking`) instead of the identity configuration
+(`TypeModel.NeedsStateTracking`/`PreserveIdentity`), which stay exactly as the type's own attributes define them.
+
+Mechanically the capability is the existing state-aware machinery: `InternalFastDeepClone(source, state)` is
+emitted for every root and already honors a supplied state (guarded `GetKnownRef`/`AddKnownRef`), so no second
+implementation is generated. What the capability adds is that a capable root's helpers — implicit POCO helpers,
+collection/dictionary/array helpers, `Cloner<T>` branches and derived-type helpers — also accept and thread that
+state (`CloneGeneratorContext.StateCapable`, `ImplicitHelperNeedsState`). Reference-typed implicit types always
+participate in a capable file so repeated references stay shared. With a `null` state (the ordinary
+`FastDeepClone()` path) every one of those additions is a no-op, so the default call keeps its exact previous
+shape, speed and allocation profile.
+
+The capability is requested by:
+
+1. `NeedsStateTracking` (the type's own cycles/identity configuration already tracks — the capability is free),
+2. any `[FastClonerPreserveIdentity]` on the type (an explicit identity configuration is exactly the case where
+   the operation-level override needs to be available and accurate), and
+3. a `PreserveIdentity = true` discovery surface.
+
+### Operation-level override
+
+`FastCloneOptions.PreserveIdentity` (shared assembly, next to `FcGeneratedCloneState`) is the explicit
+operation-level request: `value.FastDeepClone(FastCloneOptions.PreserveIdentity)`. This is deliberately *not*
+`CloneBehavior`, which describes `Reference`/`Shallow`/`Ignore` — a different dimension.
+
+The generated overload delegates to the existing entry point when the option is absent and to
+`InternalFastDeepClone(source, new FcGeneratedCloneState())` when it is present, making the request the strongest
+requirement for that invocation: topology is preserved whether the type's default preserves or not. Only capable
+roots expose the overload, so the guarantee cannot be requested where it cannot be honored — the call does not
+compile instead of silently returning an untracked clone.
+
+### Combining several requirements for one root
+
+Capability is a union, never a contest. `Surface A → Form (PreserveIdentity required)` and
+`Surface B → Form (no requirement)` produce one `Form` root whose default behavior is whatever `Form`'s own
+configuration says; the requirement merely ensures the generated graph can serve a preserving operation. Roots
+are deduplicated by fully qualified name and the capability flag is OR-ed.
+
+If the discovered type is already `[FastClonerClonable]`, discovery does not skip the requirement and does not
+emit a second root: the requirement is carried as an FQN-keyed requirement and OR-ed into the model produced by
+the clonable pipeline before code generation.
+
+### Confirmed pre-existing limitations (reported, not fixed here)
+
+- **Member-level negative override.** `[FastClonerPreserveIdentity(false)]` on a member is expressed by passing
+  `null` as the child's state (`InternalFastDeepClone(child, null)`), i.e. "use the child type's default". When
+  the child type's own default is preserving, the child allocates its own state and tracks anyway, so the
+  override cannot suppress tracking inside that member's subgraph. Both the working case (non-preserving child
+  default) and the limitation are covered by characterization tests in `IdentityPreservationTests`.
+- **Runtime-delegated members.** Members the generator delegates to the runtime cloner (custom handlers, types
+  without a modellable shape) use the runtime's own tracking state, and the runtime cloner does not accept the
+  generated `FcGeneratedCloneState`. Inside such a member the runtime preserves identity per the runtime's own
+  policy, but an object shared between a generated path and a runtime-delegated path can still be cloned twice,
+  and this is unchanged by the capability (probed: generated `A' != B'` while the runtime cloner yields
+  `A' == B'` for the same graph). Closing it needs a runtime-side decision about accepting an external
+  known-refs bridge; it is intentionally out of scope for this change.
+
+### Marked method vs marked containing type
+
+For a method usage, only the *method's* closed type arguments are collected when the method itself carries the
+attribute; the containing type's closed arguments are collected when the containing type is a discovery point
+(itself marked, or declaring a marked method). An unmarked generic method on a marked containing type therefore
+does not contribute its type arguments.
+
 
 ### Known boundaries
 
 - Discovery observes closed generic *syntax*. Generic method type arguments that are left to inference
   (`Operations.Execute()` with nothing written out) are not observed; the type-argument form is.
-- Types that are already `[FastClonerClonable]` keep their own generated entry point; `PreserveIdentity` declared
-  on a discovery surface does not override a root that already exists through its own attribute.
+- Types that are already `[FastClonerClonable]` keep their own generated entry point. A `PreserveIdentity`
+  requirement from a discovery surface adds the capability to that root; it cannot change, and does not attempt
+  to change, the default behavior the type configured for itself.
+- `FastDeepClone(FastCloneOptions)` exists only where the capability was requested. Ordinary roots keep the
+  overload out of their generated surface so the default path cannot be mistaken for a tracked one.
 

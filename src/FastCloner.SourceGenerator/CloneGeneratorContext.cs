@@ -23,6 +23,14 @@ internal sealed class CloneGeneratorContext
     
     public bool CanHaveCircularReferences { get; set; }
     public bool NeedsStateTracking { get; set; }
+
+    /// <summary>
+    /// Whether a tracking state supplied to <c>InternalFastDeepClone(source, state)</c> is honored
+    /// throughout this file's generated graph (helpers included). This is the capability behind an
+    /// explicit <c>FastDeepClone(FastCloneOptions.PreserveIdentity)</c> operation and is a superset of
+    /// <see cref="NeedsStateTracking"/>: it never changes what the public default entry point does.
+    /// </summary>
+    public bool StateCapable { get; }
     public bool IsFastClonerAvailable { get; }
     public TargetFramework TargetFramework { get; }
     public BridgeContract BridgeContract { get; }
@@ -49,6 +57,7 @@ internal sealed class CloneGeneratorContext
             }
         }
         NeedsStateTracking = model.NeedsStateTracking || anyMemberNeedsIdentity;
+        StateCapable = NeedsStateTracking || model.SupportsStateTracking;
         
         _typeNameToMethodName = sharedMethodNames ?? new Dictionary<string, string>();
         _neededHelperMethods = sharedNeededHelpers ?? [];
@@ -79,6 +88,24 @@ internal sealed class CloneGeneratorContext
     }
 
     public bool HasPendingHelperMethods => _pendingHelperMethods.Count > 0;
+
+    /// <summary>
+    /// Whether the implicit helper for <paramref name="implicitModel"/> in this file takes a
+    /// tracking state. While the file is state capable, reference-typed implicit types always
+    /// participate so repeated references stay shared; structs keep their existing behavior
+    /// (a distinct copy per occurrence is correct for value semantics). Call sites and helper
+    /// definitions both go through this method so they cannot drift apart.
+    /// </summary>
+    public bool ImplicitHelperNeedsState(TypeModel implicitModel)
+    {
+        if (!StateCapable)
+            return false;
+
+        if (implicitModel.IsStruct)
+            return NeedsCircularState(implicitModel.FullyQualifiedName, implicitModel.NeedsStateTracking);
+
+        return true;
+    }
 
     public string DequeuePendingHelperMethod() => _pendingHelperMethods.Dequeue();
 

@@ -139,7 +139,7 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
     }
 
     [Test]
-    public async Task ClonablePayload_ShouldNotEmitADuplicateRoot()
+    public async Task ClonablePayload_ShouldConvergeRequirementsIntoItsSingleRoot()
     {
         const string source = """
             #nullable enable
@@ -147,7 +147,7 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
 
             namespace TestNamespace;
 
-            [FastClonerDiscoverGenericArguments]
+            [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
             public interface IContainer<T>
             {
             }
@@ -174,6 +174,12 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
 
         await Assert.That(rootExtensionDeclarations.Count).IsEqualTo(1)
             .Because("a type that is already a root through [FastClonerClonable] must not be generated twice");
+
+        string payloadSource = generated.Single(source => source.HintName.Contains("Payload")).Text;
+        await Assert.That(payloadSource).Contains("FastCloneOptions options")
+            .Because("the discovery requirement must converge into the existing root as the capability to honor a supplied state");
+        await Assert.That(payloadSource).Contains("FastDeepClone(this")
+            .Because("the existing default entry point stays in place");
 
         List<Diagnostic> compileErrors = compilationDiagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
         await Assert.That(compileErrors).IsEmpty()
@@ -385,7 +391,7 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
 
             namespace TestNamespace;
 
-            [FastClonerDiscoverGenericArguments]
+            [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
             public interface IContainer<T>
             {
             }
@@ -395,9 +401,16 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
                 public string Name { get; set; } = string.Empty;
             }
 
+            [FastClonerClonable]
+            public class ClonablePayload
+            {
+                public string Name { get; set; } = string.Empty;
+            }
+
             public class Usage
             {
                 public IContainer<Payload>? Container { get; set; }
+                public IContainer<ClonablePayload>? Clonable { get; set; }
             }
             """;
 
@@ -414,30 +427,52 @@ public class SourceGeneratorGenericArgumentDiscoveryPipelineTests
         SyntaxTree tree = CSharpSyntaxTree.ParseText(source);
         CSharpCompilation compilation = CreateCompilation("TestAssembly", tree, []);
 
-        GeneratorDriver driver = CSharpGeneratorDriver.Create(
-            [new FastClonerIncrementalGenerator().AsSourceGenerator()],
-            driverOptions: new GeneratorDriverOptions(IncrementalGeneratorOutputKind.None, trackIncrementalGeneratorSteps: true));
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(new FastClonerIncrementalGenerator());
 
         driver = driver.RunGenerators(compilation);
-        driver = driver.RunGenerators(compilation.AddSyntaxTrees(CSharpSyntaxTree.ParseText(unrelatedSource)));
-        GeneratorDriverRunResult runResult = driver.GetRunResult();
+        GeneratedSourceResult? initialDiscovery = FindGeneratedSource(driver.GetRunResult(), "_Payload_FastDeepClone");
+        await Assert.That(initialDiscovery.HasValue).IsTrue();
 
+        // Two unrelated edits: the discovery output must not be recomputed, so the generated text
+        // instance stays the very same object (a re-run would produce a fresh instance, and with it
+        // a new generation timestamp).
+        CSharpCompilation withFirstFile = compilation.AddSyntaxTrees(CSharpSyntaxTree.ParseText(unrelatedSource));
+        driver = driver.RunGenerators(withFirstFile);
+        GeneratedSourceResult? afterFirstEdit = FindGeneratedSource(driver.GetRunResult(), "_Payload_FastDeepClone");
+        await Assert.That(afterFirstEdit.HasValue).IsTrue();
+        await Assert.That(ReferenceEquals(initialDiscovery.Value.SourceText, afterFirstEdit.Value.SourceText)).IsTrue()
+            .Because("adding an unrelated file must not re-run the discovery output");
+
+        CSharpCompilation withSecondFile = withFirstFile.AddSyntaxTrees(CSharpSyntaxTree.ParseText(unrelatedSource.Replace("Unrelated", "Unrelated2")));
+        driver = driver.RunGenerators(withSecondFile);
+        GeneratorDriverRunResult runResult = driver.GetRunResult();
+        GeneratedSourceResult? afterSecondEdit = FindGeneratedSource(runResult, "_Payload_FastDeepClone");
+        await Assert.That(afterSecondEdit.HasValue).IsTrue();
+        await Assert.That(ReferenceEquals(initialDiscovery.Value.SourceText, afterSecondEdit.Value.SourceText)).IsTrue()
+            .Because("the discovery output stays cached for every unrelated change, not just the first");
+
+        // The roots themselves are unchanged and still expose the capability.
         List<(string HintName, string Text)> generated = CollectGeneratedSources(runResult);
         await Assert.That(Roots(generated).Any(r => r.Contains("Payload"))).IsTrue();
+        await Assert.That(generated.Any(source => source.Text.Contains("FastCloneOptions options"))).IsTrue()
+            .Because("both the discovered root and the already-clonable root gain the capability");
+    }
 
-        List<IncrementalStepRunReason> reasons = [];
-        foreach (ImmutableArray<IncrementalGeneratorRunStep> steps in runResult.Results[0].TrackedOutputSteps.Values)
+    private static GeneratedSourceResult? FindGeneratedSource(GeneratorDriverRunResult runResult, string hintNameFragment)
+    {
+        foreach (GeneratorRunResult result in runResult.Results)
         {
-            if (steps.IsDefault)
+            if (result.GeneratedSources.IsDefault)
                 continue;
 
-            foreach (IncrementalGeneratorRunStep step in steps)
-                reasons.AddRange(step.Outputs.Select(output => output.Reason));
+            foreach (GeneratedSourceResult source in result.GeneratedSources)
+            {
+                if (source.HintName.Contains(hintNameFragment, StringComparison.Ordinal))
+                    return source;
+            }
         }
 
-        await Assert.That(reasons).IsNotEmpty();
-        await Assert.That(reasons.All(reason => reason is IncrementalStepRunReason.Cached or IncrementalStepRunReason.Unchanged)).IsTrue()
-            .Because("adding an unrelated file must not re-run the discovery output: " + string.Join(",", reasons));
+        return null;
     }
 
     [Test]

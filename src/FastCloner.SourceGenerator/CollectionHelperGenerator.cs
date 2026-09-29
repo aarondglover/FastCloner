@@ -54,11 +54,9 @@ internal static class CollectionHelperGenerator
     private static void WriteImplicitCloneMethod(CloneGeneratorContext context, TypeModel implicitModel, string methodName)
     {
         string typeName = implicitModel.FullyQualifiedName;
-        // Determine if we need state. 
-        // If Root can't have circular refs, then we don't pass state down (it's null).
-        // If Root CAN, then we check if ImplicitModel CAN.
-        // If ImplicitModel CAN, we accept state.
-        bool needsState = implicitModel.NeedsStateTracking && context.NeedsStateTracking;
+        // Whether this implicit helper accepts a tracking state is decided by the file's capability
+        // (see ImplicitHelperNeedsState); a null state on ordinary calls keeps the fast path.
+        bool needsState = context.ImplicitHelperNeedsState(implicitModel);
         StringBuilder sb = context.Source;
 
         if (needsState)
@@ -444,7 +442,7 @@ internal static class CollectionHelperGenerator
             }
             
             string helperName = context.GetOrCreateHelperMethodName(implicitModel.FullyQualifiedName);
-            bool elementNeedsState = implicitModel.NeedsStateTracking && context.NeedsStateTracking;
+            bool elementNeedsState = context.ImplicitHelperNeedsState(implicitModel);
             string actualStateVar = parentNeedsState ? "state" : "null";
             return GetHelperMethodCall(context, helperName, itemVar, elementNeedsState, actualStateVar);
         }
@@ -688,7 +686,7 @@ internal static class CollectionHelperGenerator
                 else
                 {
                     string helperName = context.GetOrCreateHelperMethodName(implicitKeyModel.FullyQualifiedName);
-                    bool keyNeedsState = implicitKeyModel.NeedsStateTracking && context.NeedsStateTracking;
+                    bool keyNeedsState = context.ImplicitHelperNeedsState(implicitKeyModel);
                     string actualStateVar = needsState ? "state" : "null";
                     keyExpr = GetHelperMethodCall(context, helperName, "kvp.Key", keyNeedsState, actualStateVar);
                 }
@@ -724,7 +722,7 @@ internal static class CollectionHelperGenerator
                 else
                 {
                     string helperName = context.GetOrCreateHelperMethodName(implicitValModel.FullyQualifiedName);
-                    bool valNeedsState = implicitValModel.NeedsStateTracking && context.NeedsStateTracking;
+                    bool valNeedsState = context.ImplicitHelperNeedsState(implicitValModel);
                     string actualStateVar = needsState ? "state" : "null";
                     valExpr = GetHelperMethodCall(context, helperName, "kvp.Value", valNeedsState, actualStateVar);
                 }
@@ -811,7 +809,7 @@ internal static class CollectionHelperGenerator
                 else
                 {
                     string helperName = context.GetOrCreateHelperMethodName(implicitModel.FullyQualifiedName);
-                    bool elementNeedsState = implicitModel.NeedsStateTracking && context.NeedsStateTracking;
+                    bool elementNeedsState = context.ImplicitHelperNeedsState(implicitModel);
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = GetHelperMethodCall(context, helperName, "source[i]", elementNeedsState, actualStateVar);
                 }
@@ -921,7 +919,7 @@ internal static class CollectionHelperGenerator
                 else
                 {
                     string helperName = context.GetOrCreateHelperMethodName(implicitModel.FullyQualifiedName);
-                    bool elementNeedsState = implicitModel.NeedsStateTracking && context.NeedsStateTracking;
+                    bool elementNeedsState = context.ImplicitHelperNeedsState(implicitModel);
                     string actualStateVar = needsState ? "state" : "null";
                     itemExpr = GetHelperMethodCall(context, helperName, $"source[{indexList}]", elementNeedsState, actualStateVar);
                 }

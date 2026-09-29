@@ -286,8 +286,8 @@ Notes:
 - Only explicit closed generic syntax is observed: generic *method* type arguments must be written out
   (`Execute<Request, Response>()`), not left to inference.
 
-Add `PreserveIdentity = true` to give the roots discovered through that surface `[FastClonerPreserveIdentity]`
-semantics:
+Add `PreserveIdentity = true` to declare that the types discovered through that surface must have the
+*generated capability* to serve an explicit identity-preserving operation:
 
 ```cs
 [FastClonerDiscoverGenericArguments(PreserveIdentity = true)]
@@ -295,8 +295,29 @@ public interface IGraph<T>
 {
 }
 
-// clone.Target1 == clone.Target2 whenever source.Target1 == source.Target2
+// The type's default behavior is unchanged...
+Graph graph = CreateGraph();
+Graph plain = graph.FastDeepClone();
+
+// ...but this call positively requires reference topology for that operation:
+Graph preserving = graph.FastDeepClone(FastCloneOptions.PreserveIdentity);
+// preserving.Left == preserving.Right whenever graph.Left == graph.Right
 ```
+
+`PreserveIdentity` on a surface is a requirement on the generated root, not a new default. It never changes
+what `FastDeepClone()` does for the type, and a type discovered through both preserving and ordinary surfaces
+simply gets the capability once — there is no "winning" surface. Types that already carry
+`[FastClonerClonable]` keep their single generated root and gain the capability in place.
+
+A root exposes `FastDeepClone(FastCloneOptions)` when it can honor the request:
+a type discovered through a surface declaring `PreserveIdentity = true`, or a type that configures identity
+itself with `[FastClonerPreserveIdentity]`. Anywhere else the overload is not generated, so `FastDeepClone()`
+stays on its existing fast path and a caller cannot silently receive a clone that ignores the requirement.
+
+> **Note**: the generated capability covers everything the generated graph clones. Members that FastCloner
+> delegates to the runtime cloner (custom handlers, types the generator cannot model) use the runtime's own
+> tracking state, so an object shared between a generated path and a runtime-delegated path can still end up
+> cloned twice.
 
 ### Custom Cloning Context
 
@@ -455,6 +476,33 @@ public class Graph
 ```
 
 > **Note**: Identity preservation adds overhead for tracking seen objects. Circular references are always detected regardless of this setting.
+
+#### Requiring identity preservation for a single call
+
+The attributes above configure the default behavior of a type. When a single operation needs the guarantee
+regardless of that default — or when a type is deliberately non-preserving by default and one call is not —
+use the operation-level option:
+
+```csharp
+[FastClonerClonable]
+[FastClonerPreserveIdentity(false)] // Keep the fast default
+public class Document
+{
+    public User Author { get; set; }
+    public User LastEditor { get; set; }
+}
+
+var doc = new Document { Author = user, LastEditor = user };
+
+Document plain = doc.FastDeepClone();                                  // default: two independent clones
+Document shared = doc.FastDeepClone(FastCloneOptions.PreserveIdentity); // this call: Author and LastEditor stay shared
+```
+
+The option describes what *this* invocation requires; it never changes the type's configured default and no
+second clone implementation is generated. The overload exists for roots that declare the capability — a type
+with `[FastClonerPreserveIdentity]`, or a type discovered through
+`[FastClonerDiscoverGenericArguments(PreserveIdentity = true)]`. Elsewhere the call does not compile rather than
+quietly returning an untracked clone.
 
 ## Limitations
 

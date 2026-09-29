@@ -476,4 +476,84 @@ public class IdentityPreservationTests
     }
     
     #endregion
+    
+    #region Test 11: member PreserveIdentity(false) precedence against child type defaults
+    
+    public class PrecedenceGrandChild
+    {
+        public int Value { get; set; }
+    }
+    
+    [FastClonerClonable]
+    public class PlainDefaultChild
+    {
+        public PrecedenceGrandChild? First { get; set; }
+        public PrecedenceGrandChild? Second { get; set; }
+    }
+    
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity]
+    public class PreservingDefaultChild
+    {
+        public PrecedenceGrandChild? First { get; set; }
+        public PrecedenceGrandChild? Second { get; set; }
+    }
+    
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity]
+    public class PlainChildOverrideRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PlainDefaultChild Child { get; set; } = new();
+    }
+    
+    [FastClonerClonable]
+    [FastClonerPreserveIdentity]
+    public class PreservingChildOverrideRoot
+    {
+        [FastClonerPreserveIdentity(false)]
+        public PreservingDefaultChild Child { get; set; } = new();
+    }
+    
+    [Test]
+    public async Task MemberPreserveIdentityFalse_AgainstChildWithoutPreservingDefault_DisablesTrackingForThatMember()
+    {
+        PrecedenceGrandChild shared = new PrecedenceGrandChild { Value = 1 };
+        PlainChildOverrideRoot original = new PlainChildOverrideRoot
+        {
+            Child = new PlainDefaultChild { First = shared, Second = shared }
+        };
+        
+        PlainChildOverrideRoot clone = original.FastDeepClone();
+        
+        // The member override keeps the parent's state out of this member, so the child does not
+        // deduplicate: this is the documented meaning of [FastClonerPreserveIdentity(false)].
+        await Assert.That(clone.Child.First).IsNotSameReferenceAs(clone.Child.Second)
+            .Because("the member opted out of identity tracking and the child type does not track by default");
+    }
+    
+    /// <summary>
+    /// Characterizes a limitation of the existing (pre-discovery) design rather than an intended
+    /// contract: <c>[FastClonerPreserveIdentity(false)]</c> on a member is expressed by passing
+    /// <c>null</c> as the child's state (<c>InternalFastDeepClone(child, null)</c>), which means "use
+    /// the child type's own default". When that default is preserving, the child allocates its own
+    /// state and tracks anyway, so the override cannot suppress tracking inside the child's subgraph.
+    /// Reported as-is; fixing it would need a way to pass "do not track" as an explicit signal.
+    /// </summary>
+    [Test]
+    public async Task MemberPreserveIdentityFalse_AgainstChildTypeThatPreservesByDefault_IsNotExpressible()
+    {
+        PrecedenceGrandChild shared = new PrecedenceGrandChild { Value = 2 };
+        PreservingChildOverrideRoot original = new PreservingChildOverrideRoot
+        {
+            Child = new PreservingDefaultChild { First = shared, Second = shared }
+        };
+        
+        PreservingChildOverrideRoot clone = original.FastDeepClone();
+        
+        await Assert.That(clone.Child.First).IsSameReferenceAs(clone.Child.Second)
+            .Because("the child type's own preserving default wins over the member override (pre-existing limitation)");
+    }
+    
+    #endregion
 }

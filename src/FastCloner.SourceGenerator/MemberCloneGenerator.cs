@@ -47,8 +47,7 @@ internal static class MemberCloneGenerator
                         if (context.ShouldInline(member.TypeFullName) && 
                             context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel))
                         {
-                            bool inlineModelDefault = implicitModel.NeedsStateTracking;
-                            bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
+                            bool inlineMemberNeedsState = context.ImplicitHelperNeedsState(implicitModel);
                             bool inlineShouldPassState = inlineMemberNeedsState || (stateVar != "null");
                             string inlineActualStateVar = inlineShouldPassState ? stateVar : "null";
 
@@ -59,7 +58,9 @@ internal static class MemberCloneGenerator
                         context.TryGetImplicitTypeModel(member.TypeFullName, out implicitModel);
 
                         bool modelDefault = implicitModel?.NeedsStateTracking ?? false;
-                        bool memberNeedsState = context.NeedsCircularState(member.TypeFullName, modelDefault) && context.NeedsStateTracking;
+                        bool memberNeedsState = implicitModel != null
+                            ? context.ImplicitHelperNeedsState(implicitModel)
+                            : context.NeedsCircularState(member.TypeFullName, modelDefault) && context.StateCapable;
                         bool isRegisteredType = helperMethodName == "Clone";
                         bool shouldPassState = memberNeedsState || (isRegisteredType && stateVar != "null");
                         string actualStateVar = shouldPassState ? stateVar : "null";
@@ -188,8 +189,7 @@ internal static class MemberCloneGenerator
                         if (context.ShouldInline(member.TypeFullName) && 
                             context.TryGetImplicitTypeModel(member.TypeFullName, out var implicitModel))
                         {
-                            bool inlineModelDefault = implicitModel.NeedsStateTracking;
-                            bool inlineMemberNeedsState = context.NeedsCircularState(member.TypeFullName, inlineModelDefault) && context.NeedsStateTracking;
+                            bool inlineMemberNeedsState = context.ImplicitHelperNeedsState(implicitModel);
                             bool inlineShouldPassState = inlineMemberNeedsState || (stateVar != "null");
                             string inlineActualStateVar = inlineShouldPassState ? stateVar : "null";
 
@@ -200,7 +200,9 @@ internal static class MemberCloneGenerator
                         string helperMethodName = context.GetOrCreateHelperMethodName(member);
                         context.TryGetImplicitTypeModel(member.TypeFullName, out implicitModel);
                         bool modelDefault = implicitModel?.NeedsStateTracking ?? false;
-                        bool memberNeedsState = context.NeedsCircularState(member.TypeFullName, modelDefault) && context.NeedsStateTracking;
+                        bool memberNeedsState = implicitModel != null
+                            ? context.ImplicitHelperNeedsState(implicitModel)
+                            : context.NeedsCircularState(member.TypeFullName, modelDefault) && context.StateCapable;
                         bool isRegisteredType = helperMethodName == "Clone";
                         bool shouldPassState = memberNeedsState || (isRegisteredType && stateVar != "null");
                         string actualStateVar = shouldPassState ? stateVar : "null";
@@ -312,12 +314,13 @@ internal static class MemberCloneGenerator
     
     public static bool MemberNeedsCircularRefTracking(CloneGeneratorContext context, MemberModel member)
     {
+        // An explicit member-level decision is always honored, including a negative one.
         if (member.PreserveIdentity is not null)
         {
             return member.PreserveIdentity.Value;
         }
         
-        if (!context.NeedsStateTracking)
+        if (!context.StateCapable)
             return false;
 
         switch (member.TypeKind)

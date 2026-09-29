@@ -143,6 +143,7 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine("    {");
         
         WritePublicFastDeepCloneMethod(typeName, fullTypeName);
+        WritePublicFastDeepCloneWithOptionsMethod(typeName);
         WritePrivateFastDeepCloneMethod(typeName, fullTypeName);
         WriteDerivedTypeHelpers();
         WriteClonerClass();
@@ -238,6 +239,51 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine("            return InternalFastDeepClone(source, null);");
         }
 
+        sb.AppendLine("        }");
+        sb.AppendLine();
+    }
+
+    /// <summary>
+    /// Emits the operation-level entry point that can positively require identity preservation for a
+    /// single call. The default entry point above keeps its existing behavior and fast path: a
+    /// tracking state is only allocated when the caller asks for it, so ordinary calls pay nothing.
+    /// </summary>
+    private void WritePublicFastDeepCloneWithOptionsMethod(string typeName)
+    {
+        if (!_context.StateCapable)
+            return;
+
+        StringBuilder sb = _context.Source;
+        string typeParams = GetTypeParametersString();
+        string constraints = GetTypeConstraintsString();
+        bool isStruct = _context.Model.IsStruct;
+        bool trustNullability = _context.Model.TrustNullability;
+        string returnTypeSuffix = isStruct ? "" : "?";
+        string paramTypeSuffix = (isStruct || trustNullability) ? "" : "?";
+
+        sb.AppendLine($"        /// <summary>");
+        sb.AppendLine($"        /// Performs deep clone of {_context.Model.Name} honoring the requested operation options.");
+        sb.AppendLine($"        /// </summary>");
+        sb.AppendLine($"        /// <param name=\"source\">The object to clone.</param>");
+        sb.AppendLine($"        /// <param name=\"options\">Requirements for this operation.</param>");
+        sb.AppendLine($"        /// <remarks>");
+        sb.AppendLine($"        /// {GeneratedTypeNames.FastCloneOptions}.PreserveIdentity requires reference topology");
+        sb.AppendLine($"        /// preservation for this call regardless of the type's default. Without it the call is");
+        sb.AppendLine($"        /// identical to FastDeepClone(source), so the type's default behavior is never changed.");
+        sb.AppendLine($"        /// </remarks>");
+
+        string notNullAttr = CloneGeneratorContext.NotNullIfNotNullAttr(_context.Model.CodeAnalysisAvailable && !isStruct);
+        if (!string.IsNullOrEmpty(notNullAttr))
+            sb.AppendLine($"        {notNullAttr}");
+
+        sb.AppendLine($"        public static {typeName}{returnTypeSuffix} FastDeepClone{typeParams}(this {typeName}{paramTypeSuffix} source, {GeneratedTypeNames.FastCloneOptions} options){constraints}");
+        sb.AppendLine("        {");
+        sb.AppendLine($"            if ((options & {GeneratedTypeNames.FastCloneOptions}.PreserveIdentity) == 0)");
+        sb.AppendLine("            {");
+        sb.AppendLine($"                return FastDeepClone{typeParams}(source);");
+        sb.AppendLine("            }");
+        sb.AppendLine();
+        sb.AppendLine($"            return InternalFastDeepClone{typeParams}(source, new {GeneratedTypeNames.CloneState}());");
         sb.AppendLine("        }");
         sb.AppendLine();
     }
@@ -535,7 +581,7 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine($"        private static {derivedModel.FullyQualifiedName} {methodName}{helperTypeParams}({derivedModel.FullyQualifiedName} source, {GeneratedTypeNames.CloneState}? state)");
             sb.AppendLine("        {");
             
-            if (derivedModel.NeedsStateTracking)
+            if (derivedModel.NeedsStateTracking || _context.StateCapable)
             {
                 _context.NeedsStateClass = true;
                 sb.AppendLine($"            var localState = state ?? new {GeneratedTypeNames.CloneState}();");
@@ -816,7 +862,7 @@ internal sealed class CloneCodeGenerator
                 if (_context.TryGetImplicitTypeModel(argType, out TypeModel implicitModel))
                 {
                      string helperName = _context.GetOrCreateHelperMethodName(argType);
-                     bool needsState = implicitModel.NeedsStateTracking && _context.NeedsStateTracking;
+                     bool needsState = _context.ImplicitHelperNeedsState(implicitModel);
                      string callArgs = needsState 
                         ? $"(({argType})(object)source, state)" 
                         : $"(({argType})(object)source)";
